@@ -39,15 +39,36 @@ tickers_selecionados = st.sidebar.multiselect(
     help="Escolha um ou mais ativos para comparar",
 )
 
-ticker_custom = st.sidebar.text_input(
-    "Adicionar ticker manualmente",
-    placeholder="Ex: MGLU3.SA",
-    help="Digite o ticker do Yahoo Finance e pressione Enter",
+busca = st.sidebar.text_input(
+    "Buscar por nome ou ticker",
+    placeholder="Ex: Petrobras, Apple, MGLU3...",
+    help="Digite o nome da empresa ou ticker e pressione Enter para buscar.",
 )
-if ticker_custom:
-    ticker_custom = ticker_custom.strip().upper()
-    if ticker_custom not in tickers_selecionados:
-        tickers_selecionados.append(ticker_custom)
+if busca:
+    try:
+        resultados = yf.Search(busca.strip(), max_results=8)
+        opcoes_busca = {}
+        for q in resultados.quotes:
+            if q.get("isYahooFinance"):
+                simbolo = q["symbol"]
+                nome = q.get("shortname", simbolo)
+                bolsa = q.get("exchDisp", "")
+                label = f"{simbolo} — {nome} ({bolsa})"
+                opcoes_busca[label] = simbolo
+        if opcoes_busca:
+            escolhidos = st.sidebar.multiselect(
+                "Resultados da busca",
+                options=list(opcoes_busca.keys()),
+                help="Selecione os ativos que deseja adicionar.",
+            )
+            for label in escolhidos:
+                ticker = opcoes_busca[label]
+                if ticker not in tickers_selecionados:
+                    tickers_selecionados.append(ticker)
+        else:
+            st.sidebar.caption("Nenhum resultado encontrado.")
+    except Exception:
+        st.sidebar.caption("Erro na busca. Tente novamente.")
 
 st.sidebar.markdown("---")
 
