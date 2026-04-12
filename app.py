@@ -147,6 +147,18 @@ mostrar_juro_longo = st.sidebar.toggle(
     "Dados mensais do BCB interpolados para frequência diária.",
 )
 
+mostrar_fed_curto = st.sidebar.toggle(
+    "Exibir Fed Funds Rate (curto)",
+    value=False,
+    help="T-Bill 13 semanas (^IRX) — proxy da taxa básica do Fed, comparável ao CDI.",
+)
+
+mostrar_fed_longo = st.sidebar.toggle(
+    "Exibir Treasury 5 anos (EUA)",
+    value=False,
+    help="Yield do Treasury de 5 anos (^FVX) — comparável ao juro longo brasileiro.",
+)
+
 st.sidebar.markdown("---")
 
 periodo_opcoes = {
@@ -276,6 +288,17 @@ def baixar_juro_longo(inicio, fim):
     return serie
 
 
+@st.cache_data(ttl=3600)
+def baixar_taxa_yf(ticker, inicio, fim):
+    """Baixa yield/taxa via yfinance (ex: ^IRX, ^FVX)."""
+    df = yf.download(ticker, start=inicio, end=fim, progress=False)
+    if df.empty:
+        return None
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    return df["Close"]
+
+
 # --- Download e processamento ---
 with st.spinner("Baixando dados..."):
     dados, erros = baixar_dados(
@@ -293,6 +316,14 @@ with st.spinner("Baixando dados..."):
     juro_longo = None
     if mostrar_juro_longo:
         juro_longo = baixar_juro_longo(data_inicio, data_fim)
+
+    fed_curto = None
+    if mostrar_fed_curto:
+        fed_curto = baixar_taxa_yf("^IRX", data_inicio, data_fim)
+
+    fed_longo = None
+    if mostrar_fed_longo:
+        fed_longo = baixar_taxa_yf("^FVX", data_inicio, data_fim)
 
 if erros:
     for erro in erros:
@@ -333,6 +364,16 @@ if juro_longo is not None:
     juro_longo = juro_longo.loc[juro_longo.index >= data_inicio_efetiva]
     if juro_longo.empty:
         juro_longo = None
+
+if fed_curto is not None:
+    fed_curto = fed_curto.loc[fed_curto.index >= data_inicio_efetiva]
+    if fed_curto.empty:
+        fed_curto = None
+
+if fed_longo is not None:
+    fed_longo = fed_longo.loc[fed_longo.index >= data_inicio_efetiva]
+    if fed_longo.empty:
+        fed_longo = None
 
 # Converter para dólar se necessário
 if preco_em_dolar and cambio is not None:
@@ -384,6 +425,20 @@ if data_min < data_max:
         if juro_longo.empty:
             juro_longo = None
 
+    if fed_curto is not None:
+        fed_curto = fed_curto.loc[
+            (fed_curto.index >= dt_ini) & (fed_curto.index <= dt_end)
+        ]
+        if fed_curto.empty:
+            fed_curto = None
+
+    if fed_longo is not None:
+        fed_longo = fed_longo.loc[
+            (fed_longo.index >= dt_ini) & (fed_longo.index <= dt_end)
+        ]
+        if fed_longo.empty:
+            fed_longo = None
+
 if df_precos.empty or len(df_precos) < 2:
     st.warning("Janela muito curta — selecione um intervalo maior.")
     st.stop()
@@ -394,7 +449,9 @@ df_base100 = (df_precos / df_precos.iloc[0]) * 100
 # --- Gráfico ---
 tem_cambio_eixo = mostrar_cambio and cambio is not None
 tem_juro_eixo = mostrar_juro_longo and juro_longo is not None
-usar_secundario = tem_cambio_eixo or tem_juro_eixo
+tem_fed_curto_eixo = mostrar_fed_curto and fed_curto is not None
+tem_fed_longo_eixo = mostrar_fed_longo and fed_longo is not None
+usar_secundario = tem_cambio_eixo or tem_juro_eixo or tem_fed_curto_eixo or tem_fed_longo_eixo
 
 if usar_secundario:
     fig = make_subplots(specs=[[{"secondary_y": True}]])
@@ -464,13 +521,45 @@ if tem_juro_eixo:
         secondary_y=True,
     )
 
+# Fed Funds Rate curto (eixo secundário)
+if tem_fed_curto_eixo:
+    fig.add_trace(
+        go.Scatter(
+            x=fed_curto.index,
+            y=fed_curto,
+            mode="lines",
+            name="Fed Rate (T-Bill 13w)",
+            line=dict(dash="dot", color="orange", width=2),
+            hovertemplate="<b>Fed Rate (curto)</b><br>"
+            + "Data: %{x|%d/%m/%Y}<br>"
+            + "Taxa: %{y:.2f}%<extra></extra>",
+        ),
+        secondary_y=True,
+    )
+
+# Treasury 5 anos (eixo secundário)
+if tem_fed_longo_eixo:
+    fig.add_trace(
+        go.Scatter(
+            x=fed_longo.index,
+            y=fed_longo,
+            mode="lines",
+            name="Treasury 5Y (EUA)",
+            line=dict(dash="dot", color="purple", width=2),
+            hovertemplate="<b>Treasury 5Y</b><br>"
+            + "Data: %{x|%d/%m/%Y}<br>"
+            + "Taxa: %{y:.2f}%<extra></extra>",
+        ),
+        secondary_y=True,
+    )
+
 # Label do eixo secundário
 if usar_secundario:
     labels = []
     if tem_cambio_eixo:
         labels.append("USDBRL (R$)")
-    if tem_juro_eixo:
-        labels.append("Juro (% a.a.)")
+    if tem_juro_eixo or tem_fed_curto_eixo or tem_fed_longo_eixo:
+        labels.append("Taxa (% a.a.)")
     fig.update_yaxes(title_text=" / ".join(labels), secondary_y=True)
 
 fig.add_hline(y=100, line_dash="dash", line_color="gray", opacity=0.5)
