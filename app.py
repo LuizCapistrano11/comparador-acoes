@@ -1,7 +1,9 @@
 import streamlit as st
 import yfinance as yf
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import pandas as pd
+import requests
 from datetime import date, timedelta
 
 st.set_page_config(page_title="Comparador de Ações", layout="wide")
@@ -24,6 +26,8 @@ TICKERS_POPULARES = [
     "AMZN",
     "TSLA",
 ]
+
+NOMES = {"^BVSP": "IBOVESPA"}
 
 # --- Sidebar ---
 st.sidebar.header("Configurações")
@@ -53,6 +57,32 @@ ajuste_dividendos = st.sidebar.toggle(
     help="Ativado: retorno total com dividendos reinvestidos. "
     "Desativado: apenas variação de preço (como Google Finance).",
 )
+
+mostrar_cdi = st.sidebar.toggle(
+    "Comparar com CDI",
+    value=False,
+    help="Exibe o rendimento acumulado do CDI no período.",
+)
+
+preco_em_dolar = st.sidebar.toggle(
+    "Preços em dólar (USD)",
+    value=False,
+    help="Converte os preços dos ativos para dólar usando o câmbio USDBRL.",
+)
+
+mostrar_cambio = st.sidebar.toggle(
+    "Exibir câmbio USDBRL",
+    value=False,
+    help="Adiciona a curva do câmbio USDBRL ao gráfico.",
+)
+
+mostrar_juro_longo = st.sidebar.toggle(
+    "Exibir juro longo (Swap Pré 360d)",
+    value=False,
+    help="Adiciona a curva de juros (Swap DI x Pré 360 dias) em eixo secundário.",
+)
+
+st.sidebar.markdown("---")
 
 periodo_opcoes = {
     "1 mês": 30,
@@ -88,12 +118,10 @@ else:
 data_inicio = str(data_inicio)
 data_fim = str(data_fim)
 
-# --- Download e processamento ---
+# --- Funções auxiliares ---
 if not tickers_selecionados:
     st.warning("Selecione ao menos um ticker na barra lateral.")
     st.stop()
-
-NOMES = {"^BVSP": "IBOVESPA"}
 
 
 @st.cache_data(ttl=3600)
@@ -117,10 +145,85 @@ def baixar_dados(tickers, inicio, fim, auto_adjust):
     return dados, erros
 
 
+@st.cache_data(ttl=3600)
+def baixar_cdi(inicio, fim):
+    """Baixa taxa CDI diária do BCB (série 12) e retorna série acumulada base 100."""
+    dt_inicio = pd.to_datetime(inicio)
+    dt_fim = pd.to_datetime(fim)
+    url = (
+        f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.12/dados"
+        f"?formato=json"
+        f"&dataInicial={dt_inicio.strftime('%d/%m/%Y')}"
+        f"&dataFinal={dt_fim.strftime('%d/%m/%Y')}"
+    )
+    r = requests.get(url, timeout=30)
+    if r.status_code != 200:
+        return None
+    data = r.json()
+    if not data:
+        return None
+    df = pd.DataFrame(data)
+    df["data"] = pd.to_datetime(df["data"], format="%d/%m/%Y")
+    df["valor"] = df["valor"].astype(float)
+    df = df.set_index("data").sort_index()
+    # Taxa diária em % -> fator acumulado -> base 100
+    df["fator"] = 1 + df["valor"] / 100
+    df["cdi_acum"] = df["fator"].cumprod() * 100 / df["fator"].iloc[0]
+    return df["cdi_acum"]
+
+
+@st.cache_data(ttl=3600)
+def baixar_cambio(inicio, fim):
+    """Baixa câmbio USDBRL via yfinance."""
+    df = yf.download("USDBRL=X", start=inicio, end=fim, progress=False)
+    if df.empty:
+        return None
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    return df["Close"]
+
+
+@st.cache_data(ttl=3600)
+def baixar_juro_longo(inicio, fim):
+    """Baixa Swap DI x Pré 360 dias (série 1178 do BCB)."""
+    dt_inicio = pd.to_datetime(inicio)
+    dt_fim = pd.to_datetime(fim)
+    url = (
+        f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.1178/dados"
+        f"?formato=json"
+        f"&dataInicial={dt_inicio.strftime('%d/%m/%Y')}"
+        f"&dataFinal={dt_fim.strftime('%d/%m/%Y')}"
+    )
+    r = requests.get(url, timeout=30)
+    if r.status_code != 200:
+        return None
+    data = r.json()
+    if not data:
+        return None
+    df = pd.DataFrame(data)
+    df["data"] = pd.to_datetime(df["data"], format="%d/%m/%Y")
+    df["valor"] = df["valor"].astype(float)
+    df = df.set_index("data").sort_index()
+    return df["valor"]
+
+
+# --- Download e processamento ---
 with st.spinner("Baixando dados..."):
     dados, erros = baixar_dados(
         tuple(tickers_selecionados), data_inicio, data_fim, ajuste_dividendos,
     )
+
+    cambio = None
+    if preco_em_dolar or mostrar_cambio:
+        cambio = baixar_cambio(data_inicio, data_fim)
+
+    cdi_acum = None
+    if mostrar_cdi:
+        cdi_acum = baixar_cdi(data_inicio, data_fim)
+
+    juro_longo = None
+    if mostrar_juro_longo:
+        juro_longo = baixar_juro_longo(data_inicio, data_fim)
 
 if erros:
     for erro in erros:
@@ -130,13 +233,26 @@ if not dados:
     st.error("Não foi possível baixar dados para os tickers selecionados.")
     st.stop()
 
-# Montar DataFrame e converter para base 100
+# Montar DataFrame de preços
 df_precos = pd.DataFrame(dados)
 df_precos = df_precos.dropna(how="all")
+
+# Converter para dólar se necessário
+if preco_em_dolar and cambio is not None:
+    cambio_alinhado = cambio.reindex(df_precos.index, method="ffill")
+    df_precos = df_precos.div(cambio_alinhado, axis=0)
+    df_precos = df_precos.dropna(how="all")
+
+# Converter para base 100
 df_base100 = (df_precos / df_precos.iloc[0]) * 100
 
 # --- Gráfico ---
-fig = go.Figure()
+usar_eixo_secundario = mostrar_juro_longo and juro_longo is not None
+
+if usar_eixo_secundario:
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+else:
+    fig = go.Figure()
 
 for col in df_base100.columns:
     nome = NOMES.get(col, col.replace(".SA", ""))
@@ -149,14 +265,69 @@ for col in df_base100.columns:
             hovertemplate=f"<b>{nome}</b><br>"
             + "Data: %{x|%d/%m/%Y}<br>"
             + "Base 100: %{y:.2f}<extra></extra>",
-        )
+        ),
+        secondary_y=False if usar_eixo_secundario else None,
     )
+
+# CDI acumulado
+if mostrar_cdi and cdi_acum is not None:
+    fig.add_trace(
+        go.Scatter(
+            x=cdi_acum.index,
+            y=cdi_acum,
+            mode="lines",
+            name="CDI",
+            line=dict(dash="dot", color="gold", width=2),
+            hovertemplate="<b>CDI</b><br>"
+            + "Data: %{x|%d/%m/%Y}<br>"
+            + "Base 100: %{y:.2f}<extra></extra>",
+        ),
+        secondary_y=False if usar_eixo_secundario else None,
+    )
+
+# Câmbio USDBRL
+if mostrar_cambio and cambio is not None:
+    cambio_base100 = (cambio / cambio.iloc[0]) * 100
+    fig.add_trace(
+        go.Scatter(
+            x=cambio_base100.index,
+            y=cambio_base100,
+            mode="lines",
+            name="USDBRL",
+            line=dict(dash="dash", color="green", width=2),
+            hovertemplate="<b>USDBRL</b><br>"
+            + "Data: %{x|%d/%m/%Y}<br>"
+            + "Base 100: %{y:.2f}<extra></extra>",
+        ),
+        secondary_y=False if usar_eixo_secundario else None,
+    )
+
+# Juro longo (eixo secundário)
+if usar_eixo_secundario:
+    fig.add_trace(
+        go.Scatter(
+            x=juro_longo.index,
+            y=juro_longo,
+            mode="lines",
+            name="Juro Longo (Swap Pré 360d)",
+            line=dict(dash="dashdot", color="red", width=2),
+            hovertemplate="<b>Juro Longo</b><br>"
+            + "Data: %{x|%d/%m/%Y}<br>"
+            + "Taxa: %{y:.2f}% a.a.<extra></extra>",
+        ),
+        secondary_y=True,
+    )
+    fig.update_yaxes(title_text="Taxa (% a.a.)", secondary_y=True)
 
 fig.add_hline(y=100, line_dash="dash", line_color="gray", opacity=0.5)
 
+moeda = "USD" if preco_em_dolar else "BRL"
+titulo = f"Performance Comparada — Base 100 ({moeda})"
+if ajuste_dividendos:
+    titulo += " — com dividendos"
+
 fig.update_layout(
-    title="Performance Comparada — Base 100"
-    + (" (com dividendos)" if ajuste_dividendos else " (apenas preço)"),
+    title=titulo,
     xaxis_title="Data",
     yaxis_title="Base 100",
     hovermode="x unified",
@@ -185,6 +356,19 @@ for col in df_base100.columns:
             "Máx. (%)": f"{maximo:+.2f}%",
             "Mín. (%)": f"{minimo:+.2f}%",
             "Último Valor": f"{serie.iloc[-1]:.2f}",
+        }
+    )
+
+# CDI na tabela
+if mostrar_cdi and cdi_acum is not None and len(cdi_acum) >= 2:
+    retorno_cdi = cdi_acum.iloc[-1] - 100
+    resumo.append(
+        {
+            "Ativo": "CDI",
+            "Retorno (%)": f"{retorno_cdi:+.2f}%",
+            "Máx. (%)": f"{cdi_acum.max() - 100:+.2f}%",
+            "Mín. (%)": f"{cdi_acum.min() - 100:+.2f}%",
+            "Último Valor": f"{cdi_acum.iloc[-1]:.2f}",
         }
     )
 
