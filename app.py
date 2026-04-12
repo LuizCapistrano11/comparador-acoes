@@ -62,6 +62,9 @@ periodo_opcoes = {
     "2 anos": 730,
     "5 anos": 1825,
     "10 anos": 3650,
+    "15 anos": 5475,
+    "20 anos": 7300,
+    "25 anos": 9125,
     "Máximo": 9999,
     "Personalizado": None,
 }
