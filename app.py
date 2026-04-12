@@ -47,6 +47,13 @@ if ticker_custom:
 
 st.sidebar.markdown("---")
 
+ajuste_dividendos = st.sidebar.toggle(
+    "Incluir dividendos (retorno total)",
+    value=False,
+    help="Ativado: retorno total com dividendos reinvestidos. "
+    "Desativado: apenas variação de preço (como Google Finance).",
+)
+
 periodo_opcoes = {
     "1 mês": 30,
     "3 meses": 90,
@@ -81,12 +88,15 @@ NOMES = {"^BVSP": "IBOVESPA"}
 
 
 @st.cache_data(ttl=3600)
-def baixar_dados(tickers, inicio, fim):
+def baixar_dados(tickers, inicio, fim, auto_adjust):
     dados = {}
     erros = []
     for ticker in tickers:
         try:
-            df = yf.download(ticker, start=inicio, end=fim, progress=False)
+            df = yf.download(
+                ticker, start=inicio, end=fim,
+                progress=False, auto_adjust=auto_adjust,
+            )
             if not df.empty:
                 if isinstance(df.columns, pd.MultiIndex):
                     df.columns = df.columns.get_level_values(0)
@@ -99,7 +109,9 @@ def baixar_dados(tickers, inicio, fim):
 
 
 with st.spinner("Baixando dados..."):
-    dados, erros = baixar_dados(tuple(tickers_selecionados), data_inicio, data_fim)
+    dados, erros = baixar_dados(
+        tuple(tickers_selecionados), data_inicio, data_fim, ajuste_dividendos,
+    )
 
 if erros:
     for erro in erros:
@@ -134,7 +146,8 @@ for col in df_base100.columns:
 fig.add_hline(y=100, line_dash="dash", line_color="gray", opacity=0.5)
 
 fig.update_layout(
-    title="Performance Comparada (Base 100)",
+    title="Performance Comparada — Base 100"
+    + (" (com dividendos)" if ajuste_dividendos else " (apenas preço)"),
     xaxis_title="Data",
     yaxis_title="Base 100",
     hovermode="x unified",
