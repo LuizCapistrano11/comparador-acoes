@@ -77,9 +77,10 @@ mostrar_cambio = st.sidebar.toggle(
 )
 
 mostrar_juro_longo = st.sidebar.toggle(
-    "Exibir juro longo (Swap Pré 360d)",
+    "Exibir juro longo (Swap Pré 5 anos)",
     value=False,
-    help="Adiciona a curva de juros (Swap DI x Pré 360 dias) em eixo secundário.",
+    help="Adiciona a curva de juros (Swap DI x Pré 1800 dias) em eixo secundário. "
+    "Dados mensais do BCB interpolados para frequência diária.",
 )
 
 st.sidebar.markdown("---")
@@ -145,31 +146,46 @@ def baixar_dados(tickers, inicio, fim, auto_adjust):
     return dados, erros
 
 
-@st.cache_data(ttl=3600)
-def baixar_cdi(inicio, fim):
-    """Baixa taxa CDI diária do BCB (série 12) e retorna série acumulada base 100."""
-    dt_inicio = pd.to_datetime(inicio)
-    dt_fim = pd.to_datetime(fim)
-    url = (
-        f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.12/dados"
-        f"?formato=json"
-        f"&dataInicial={dt_inicio.strftime('%d/%m/%Y')}"
-        f"&dataFinal={dt_fim.strftime('%d/%m/%Y')}"
-    )
-    r = requests.get(url, timeout=30)
-    if r.status_code != 200:
+def _baixar_serie_bcb(serie, inicio_str, fim_str):
+    """Baixa série do BCB em blocos de 10 anos (limite da API)."""
+    dt_inicio = pd.to_datetime(inicio_str)
+    dt_fim = pd.to_datetime(fim_str)
+    frames = []
+    cursor = dt_inicio
+    while cursor < dt_fim:
+        bloco_fim = min(cursor + timedelta(days=3650), dt_fim)
+        url = (
+            f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{serie}/dados"
+            f"?formato=json"
+            f"&dataInicial={cursor.strftime('%d/%m/%Y')}"
+            f"&dataFinal={bloco_fim.strftime('%d/%m/%Y')}"
+        )
+        r = requests.get(url, timeout=30)
+        if r.status_code == 200:
+            data = r.json()
+            if isinstance(data, list) and data:
+                frames.append(pd.DataFrame(data))
+        cursor = bloco_fim + timedelta(days=1)
+    if not frames:
         return None
-    data = r.json()
-    if not data:
-        return None
-    df = pd.DataFrame(data)
+    df = pd.concat(frames, ignore_index=True)
     df["data"] = pd.to_datetime(df["data"], format="%d/%m/%Y")
     df["valor"] = df["valor"].astype(float)
     df = df.set_index("data").sort_index()
-    # Taxa diária em % -> fator acumulado -> base 100
-    df["fator"] = 1 + df["valor"] / 100
-    df["cdi_acum"] = df["fator"].cumprod() * 100 / df["fator"].iloc[0]
-    return df["cdi_acum"]
+    df = df[~df.index.duplicated(keep="last")]
+    return df["valor"]
+
+
+@st.cache_data(ttl=3600)
+def baixar_cdi(inicio, fim):
+    """Baixa taxa CDI diária do BCB (série 12) e retorna série acumulada base 100."""
+    serie = _baixar_serie_bcb(12, inicio, fim)
+    if serie is None:
+        return None
+    fator = 1 + serie / 100
+    acum = fator.cumprod() * 100 / fator.iloc[0]
+    acum.name = "cdi_acum"
+    return acum
 
 
 @st.cache_data(ttl=3600)
@@ -185,26 +201,15 @@ def baixar_cambio(inicio, fim):
 
 @st.cache_data(ttl=3600)
 def baixar_juro_longo(inicio, fim):
-    """Baixa Swap DI x Pré 360 dias (série 1178 do BCB)."""
-    dt_inicio = pd.to_datetime(inicio)
-    dt_fim = pd.to_datetime(fim)
-    url = (
-        f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.1178/dados"
-        f"?formato=json"
-        f"&dataInicial={dt_inicio.strftime('%d/%m/%Y')}"
-        f"&dataFinal={dt_fim.strftime('%d/%m/%Y')}"
-    )
-    r = requests.get(url, timeout=30)
-    if r.status_code != 200:
+    """Baixa Swap DI x Pré 5 anos (série 7815 do BCB), interpolado para diário."""
+    serie = _baixar_serie_bcb(7815, inicio, fim)
+    if serie is None:
         return None
-    data = r.json()
-    if not data:
-        return None
-    df = pd.DataFrame(data)
-    df["data"] = pd.to_datetime(df["data"], format="%d/%m/%Y")
-    df["valor"] = df["valor"].astype(float)
-    df = df.set_index("data").sort_index()
-    return df["valor"]
+    # Interpolar dados mensais para frequência diária (dias úteis)
+    idx_diario = pd.bdate_range(start=serie.index[0], end=serie.index[-1])
+    serie = serie.reindex(idx_diario).interpolate(method="linear")
+    serie.name = "juro_longo"
+    return serie
 
 
 # --- Download e processamento ---
@@ -309,7 +314,7 @@ if usar_eixo_secundario:
             x=juro_longo.index,
             y=juro_longo,
             mode="lines",
-            name="Juro Longo (Swap Pré 360d)",
+            name="Juro Longo (Swap Pré 5a)",
             line=dict(dash="dashdot", color="red", width=2),
             hovertemplate="<b>Juro Longo</b><br>"
             + "Data: %{x|%d/%m/%Y}<br>"
