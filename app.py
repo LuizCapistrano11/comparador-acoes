@@ -29,46 +29,89 @@ TICKERS_POPULARES = [
 
 NOMES = {"^BVSP": "IBOVESPA"}
 
+# --- Estado persistente dos tickers ---
+if "tickers_ativos" not in st.session_state:
+    st.session_state.tickers_ativos = ["^BVSP"]
+if "nomes_cache" not in st.session_state:
+    st.session_state.nomes_cache = {}
+
+
+def adicionar_ticker(ticker, nome=None):
+    if ticker not in st.session_state.tickers_ativos:
+        st.session_state.tickers_ativos.append(ticker)
+    if nome:
+        st.session_state.nomes_cache[ticker] = nome
+
+
+def remover_ticker(ticker):
+    if ticker in st.session_state.tickers_ativos:
+        st.session_state.tickers_ativos.remove(ticker)
+
+
 # --- Sidebar ---
 st.sidebar.header("Configurações")
 
-tickers_selecionados = st.sidebar.multiselect(
-    "Selecione os tickers",
-    options=TICKERS_POPULARES,
-    default=["^BVSP"],
-    help="Escolha um ou mais ativos para comparar",
-)
-
+# Busca por nome ou ticker
+st.sidebar.subheader("Adicionar ativos")
 busca = st.sidebar.text_input(
     "Buscar por nome ou ticker",
     placeholder="Ex: Petrobras, Apple, MGLU3...",
-    help="Digite o nome da empresa ou ticker e pressione Enter para buscar.",
+    key="busca_ticker",
 )
 if busca:
     try:
         resultados = yf.Search(busca.strip(), max_results=8)
-        opcoes_busca = {}
         for q in resultados.quotes:
             if q.get("isYahooFinance"):
                 simbolo = q["symbol"]
                 nome = q.get("shortname", simbolo)
                 bolsa = q.get("exchDisp", "")
                 label = f"{simbolo} — {nome} ({bolsa})"
-                opcoes_busca[label] = simbolo
-        if opcoes_busca:
-            escolhidos = st.sidebar.multiselect(
-                "Resultados da busca",
-                options=list(opcoes_busca.keys()),
-                help="Selecione os ativos que deseja adicionar.",
-            )
-            for label in escolhidos:
-                ticker = opcoes_busca[label]
-                if ticker not in tickers_selecionados:
-                    tickers_selecionados.append(ticker)
-        else:
-            st.sidebar.caption("Nenhum resultado encontrado.")
+                ja_adicionado = simbolo in st.session_state.tickers_ativos
+                st.sidebar.button(
+                    f"{'\\u2705' if ja_adicionado else '\\u2795'} {label}",
+                    key=f"add_{simbolo}",
+                    on_click=adicionar_ticker,
+                    args=(simbolo, nome),
+                    disabled=ja_adicionado,
+                )
     except Exception:
         st.sidebar.caption("Erro na busca. Tente novamente.")
+
+# Atalhos para tickers populares
+with st.sidebar.expander("Tickers populares"):
+    for ticker in TICKERS_POPULARES:
+        nome_display = NOMES.get(ticker, ticker.replace(".SA", ""))
+        ja_adicionado = ticker in st.session_state.tickers_ativos
+        st.button(
+            f"{'\\u2705' if ja_adicionado else '\\u2795'} {nome_display} ({ticker})",
+            key=f"pop_{ticker}",
+            on_click=adicionar_ticker,
+            args=(ticker,),
+            disabled=ja_adicionado,
+        )
+
+st.sidebar.markdown("---")
+
+# Ativos no gráfico (com remoção)
+st.sidebar.subheader("Ativos no gráfico")
+if st.session_state.tickers_ativos:
+    for ticker in list(st.session_state.tickers_ativos):
+        nome_display = (
+            st.session_state.nomes_cache.get(ticker)
+            or NOMES.get(ticker)
+            or ticker.replace(".SA", "")
+        )
+        st.sidebar.button(
+            f"\\u274c {nome_display} ({ticker})",
+            key=f"rem_{ticker}",
+            on_click=remover_ticker,
+            args=(ticker,),
+        )
+else:
+    st.sidebar.caption("Nenhum ativo selecionado.")
+
+tickers_selecionados = list(st.session_state.tickers_ativos)
 
 st.sidebar.markdown("---")
 
