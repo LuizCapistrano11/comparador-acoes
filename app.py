@@ -35,7 +35,7 @@ st.sidebar.header("Configurações")
 tickers_selecionados = st.sidebar.multiselect(
     "Selecione os tickers",
     options=TICKERS_POPULARES,
-    default=["^BVSP", "PETR4.SA"],
+    default=["^BVSP"],
     help="Escolha um ou mais ativos para comparar",
 )
 
@@ -60,7 +60,7 @@ ajuste_dividendos = st.sidebar.toggle(
 
 mostrar_cdi = st.sidebar.toggle(
     "Comparar com CDI",
-    value=False,
+    value=True,
     help="Exibe o rendimento acumulado do CDI no período.",
 )
 
@@ -100,7 +100,7 @@ periodo_opcoes = {
     "Personalizado": None,
 }
 
-periodo = st.sidebar.selectbox("Período", list(periodo_opcoes.keys()), index=3)
+periodo = st.sidebar.selectbox("Período", list(periodo_opcoes.keys()), index=8)
 
 if periodo == "Personalizado":
     col1, col2 = st.sidebar.columns(2)
