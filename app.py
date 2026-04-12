@@ -68,6 +68,10 @@ else:
     data_fim = date.today()
     data_inicio = data_fim - timedelta(days=dias)
 
+# Garantir que as datas são strings para consistência com o cache
+data_inicio = str(data_inicio)
+data_fim = str(data_fim)
+
 # --- Download e processamento ---
 if not tickers_selecionados:
     st.warning("Selecione ao menos um ticker na barra lateral.")
@@ -79,21 +83,27 @@ NOMES = {"^BVSP": "IBOVESPA"}
 @st.cache_data(ttl=3600)
 def baixar_dados(tickers, inicio, fim):
     dados = {}
+    erros = []
     for ticker in tickers:
         try:
             df = yf.download(ticker, start=inicio, end=fim, progress=False)
             if not df.empty:
-                # yfinance pode retornar MultiIndex quando baixa um único ticker
                 if isinstance(df.columns, pd.MultiIndex):
                     df.columns = df.columns.get_level_values(0)
                 dados[ticker] = df["Close"]
-        except Exception:
-            pass
-    return dados
+            else:
+                erros.append(f"{ticker}: sem dados para o período")
+        except Exception as e:
+            erros.append(f"{ticker}: {e}")
+    return dados, erros
 
 
 with st.spinner("Baixando dados..."):
-    dados = baixar_dados(tuple(tickers_selecionados), str(data_inicio), str(data_fim))
+    dados, erros = baixar_dados(tuple(tickers_selecionados), data_inicio, data_fim)
+
+if erros:
+    for erro in erros:
+        st.warning(erro)
 
 if not dados:
     st.error("Não foi possível baixar dados para os tickers selecionados.")
