@@ -252,9 +252,11 @@ if preco_em_dolar and cambio is not None:
 df_base100 = (df_precos / df_precos.iloc[0]) * 100
 
 # --- Gráfico ---
-usar_eixo_secundario = mostrar_juro_longo and juro_longo is not None
+tem_cambio_eixo = mostrar_cambio and cambio is not None
+tem_juro_eixo = mostrar_juro_longo and juro_longo is not None
+usar_secundario = tem_cambio_eixo or tem_juro_eixo
 
-if usar_eixo_secundario:
+if usar_secundario:
     fig = make_subplots(specs=[[{"secondary_y": True}]])
 else:
     fig = go.Figure()
@@ -271,7 +273,7 @@ for col in df_base100.columns:
             + "Data: %{x|%d/%m/%Y}<br>"
             + "Base 100: %{y:.2f}<extra></extra>",
         ),
-        secondary_y=False if usar_eixo_secundario else None,
+        secondary_y=False if usar_secundario else None,
     )
 
 # CDI acumulado
@@ -287,28 +289,27 @@ if mostrar_cdi and cdi_acum is not None:
             + "Data: %{x|%d/%m/%Y}<br>"
             + "Base 100: %{y:.2f}<extra></extra>",
         ),
-        secondary_y=False if usar_eixo_secundario else None,
+        secondary_y=False if usar_secundario else None,
     )
 
-# Câmbio USDBRL
-if mostrar_cambio and cambio is not None:
-    cambio_base100 = (cambio / cambio.iloc[0]) * 100
+# Câmbio USDBRL (valor real, eixo secundário)
+if tem_cambio_eixo:
     fig.add_trace(
         go.Scatter(
-            x=cambio_base100.index,
-            y=cambio_base100,
+            x=cambio.index,
+            y=cambio,
             mode="lines",
             name="USDBRL",
             line=dict(dash="dash", color="green", width=2),
             hovertemplate="<b>USDBRL</b><br>"
             + "Data: %{x|%d/%m/%Y}<br>"
-            + "Base 100: %{y:.2f}<extra></extra>",
+            + "R$ %{y:.2f}<extra></extra>",
         ),
-        secondary_y=False if usar_eixo_secundario else None,
+        secondary_y=True,
     )
 
 # Juro longo (eixo secundário)
-if usar_eixo_secundario:
+if tem_juro_eixo:
     fig.add_trace(
         go.Scatter(
             x=juro_longo.index,
@@ -322,7 +323,15 @@ if usar_eixo_secundario:
         ),
         secondary_y=True,
     )
-    fig.update_yaxes(title_text="Taxa (% a.a.)", secondary_y=True)
+
+# Label do eixo secundário
+if usar_secundario:
+    labels = []
+    if tem_cambio_eixo:
+        labels.append("USDBRL (R$)")
+    if tem_juro_eixo:
+        labels.append("Juro (% a.a.)")
+    fig.update_yaxes(title_text=" / ".join(labels), secondary_y=True)
 
 fig.add_hline(y=100, line_dash="dash", line_color="gray", opacity=0.5)
 
