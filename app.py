@@ -339,6 +339,11 @@ if preco_em_dolar and cambio is not None:
     cambio_alinhado = cambio.reindex(df_precos.index, method="ffill")
     df_precos = df_precos.div(cambio_alinhado, axis=0)
     df_precos = df_precos.dropna(how="all")
+    # Converter CDI acumulado para dólar também
+    if cdi_acum is not None:
+        cambio_cdi = cambio.reindex(cdi_acum.index, method="ffill")
+        cdi_em_usd = cdi_acum / cambio_cdi
+        cdi_acum = cdi_em_usd / cdi_em_usd.dropna().iloc[0] * 100
 
 # --- Slider de ajuste fino da janela ---
 datas_disponiveis = df_precos.index
