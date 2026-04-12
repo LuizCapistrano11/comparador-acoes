@@ -248,8 +248,8 @@ if preco_em_dolar and cambio is not None:
     df_precos = df_precos.div(cambio_alinhado, axis=0)
     df_precos = df_precos.dropna(how="all")
 
-# Converter para base 100
-df_base100 = (df_precos / df_precos.iloc[0]) * 100
+# Converter para base 100 (cada ativo normalizado pelo seu primeiro valor válido)
+df_base100 = df_precos.apply(lambda col: col / col.dropna().iloc[0] * 100)
 
 # --- Gráfico ---
 tem_cambio_eixo = mostrar_cambio and cambio is not None
