@@ -61,6 +61,8 @@ periodo_opcoes = {
     "1 ano": 365,
     "2 anos": 730,
     "5 anos": 1825,
+    "10 anos": 3650,
+    "Máximo": 9999,
     "Personalizado": None,
 }
 
@@ -68,7 +70,11 @@ periodo = st.sidebar.selectbox("Período", list(periodo_opcoes.keys()), index=3)
 
 if periodo == "Personalizado":
     col1, col2 = st.sidebar.columns(2)
-    data_inicio = col1.date_input("Início", value=date.today() - timedelta(days=365))
+    data_inicio = col1.date_input(
+        "Início",
+        value=date.today() - timedelta(days=365),
+        min_value=date(2000, 1, 1),
+    )
     data_fim = col2.date_input("Fim", value=date.today())
 else:
     dias = periodo_opcoes[periodo]
