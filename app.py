@@ -242,14 +242,85 @@ if not dados:
 df_precos = pd.DataFrame(dados)
 df_precos = df_precos.dropna(how="all")
 
+# Ajustar janela: começar na data do dado mais recente entre todos os ativos
+# para garantir que todos tenham dados desde o início e base 100 seja comparável
+data_inicio_efetiva = df_precos.apply(lambda col: col.dropna().index[0]).max()
+df_precos = df_precos.loc[data_inicio_efetiva:]
+df_precos = df_precos.dropna(how="all")
+
+if df_precos.empty:
+    st.error("Não há dados suficientes para o período e ativos selecionados.")
+    st.stop()
+
+# Recortar CDI, câmbio e juro longo para a mesma janela
+if cdi_acum is not None:
+    cdi_acum = cdi_acum.loc[cdi_acum.index >= data_inicio_efetiva]
+    if not cdi_acum.empty:
+        cdi_acum = cdi_acum / cdi_acum.iloc[0] * 100
+    else:
+        cdi_acum = None
+
+if cambio is not None:
+    cambio = cambio.loc[cambio.index >= data_inicio_efetiva]
+    if cambio.empty:
+        cambio = None
+
+if juro_longo is not None:
+    juro_longo = juro_longo.loc[juro_longo.index >= data_inicio_efetiva]
+    if juro_longo.empty:
+        juro_longo = None
+
 # Converter para dólar se necessário
 if preco_em_dolar and cambio is not None:
     cambio_alinhado = cambio.reindex(df_precos.index, method="ffill")
     df_precos = df_precos.div(cambio_alinhado, axis=0)
     df_precos = df_precos.dropna(how="all")
 
-# Converter para base 100 (cada ativo normalizado pelo seu primeiro valor válido)
-df_base100 = df_precos.apply(lambda col: col / col.dropna().iloc[0] * 100)
+# --- Slider de ajuste fino da janela ---
+datas_disponiveis = df_precos.index
+data_min = datas_disponiveis[0].date()
+data_max = datas_disponiveis[-1].date()
+
+if data_min < data_max:
+    janela = st.slider(
+        "Ajuste a janela de análise",
+        min_value=data_min,
+        max_value=data_max,
+        value=(data_min, data_max),
+        format="DD/MM/YYYY",
+    )
+    # Filtrar todos os dados pela janela selecionada
+    dt_ini = pd.Timestamp(janela[0])
+    dt_end = pd.Timestamp(janela[1])
+    df_precos = df_precos.loc[dt_ini:dt_end]
+
+    if cdi_acum is not None:
+        cdi_acum = cdi_acum.loc[
+            (cdi_acum.index >= dt_ini) & (cdi_acum.index <= dt_end)
+        ]
+        if not cdi_acum.empty:
+            cdi_acum = cdi_acum / cdi_acum.iloc[0] * 100
+        else:
+            cdi_acum = None
+
+    if cambio is not None:
+        cambio = cambio.loc[(cambio.index >= dt_ini) & (cambio.index <= dt_end)]
+        if cambio.empty:
+            cambio = None
+
+    if juro_longo is not None:
+        juro_longo = juro_longo.loc[
+            (juro_longo.index >= dt_ini) & (juro_longo.index <= dt_end)
+        ]
+        if juro_longo.empty:
+            juro_longo = None
+
+if df_precos.empty or len(df_precos) < 2:
+    st.warning("Janela muito curta — selecione um intervalo maior.")
+    st.stop()
+
+# Converter para base 100
+df_base100 = (df_precos / df_precos.iloc[0]) * 100
 
 # --- Gráfico ---
 tem_cambio_eixo = mostrar_cambio and cambio is not None
@@ -347,9 +418,14 @@ fig.update_layout(
     hovermode="x unified",
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     height=600,
+    dragmode="pan",
 )
 
-st.plotly_chart(fig, use_container_width=True)
+st.plotly_chart(
+    fig,
+    use_container_width=True,
+    config={"scrollZoom": False, "modeBarButtonsToRemove": ["zoom2d", "select2d", "lasso2d"]},
+)
 
 # --- Tabela de resumo ---
 st.subheader("Resumo do Período")
