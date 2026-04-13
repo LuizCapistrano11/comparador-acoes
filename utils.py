@@ -1,10 +1,62 @@
+import hashlib
+import pickle
+import time
+from pathlib import Path
+
 import streamlit as st
 import yfinance as yf
 import pandas as pd
 import requests
 from datetime import timedelta
 
-# Mapa de nomes amigáveis para tickers conhecidos
+# ---------------------------------------------------------------------------
+# Cache em disco — sobrevive a restarts do Streamlit
+# ---------------------------------------------------------------------------
+_CACHE_DIR = Path(__file__).parent / ".cache"
+_CACHE_DIR.mkdir(exist_ok=True)
+
+_TTL_PRECO = 4 * 3600       # preços de ativos: 4 horas
+_TTL_BCB   = 12 * 3600      # séries do BCB: 12 horas
+
+
+def _chave(*args):
+    return hashlib.md5(str(args).encode()).hexdigest()
+
+
+def _disk_get(chave):
+    path = _CACHE_DIR / f"{chave}.pkl"
+    if path.exists() and (time.time() - path.stat().st_mtime) < _TTL_BCB:
+        try:
+            with open(path, "rb") as f:
+                return pickle.load(f)
+        except Exception:
+            pass
+    return None
+
+
+def _disk_get_preco(chave):
+    path = _CACHE_DIR / f"{chave}.pkl"
+    if path.exists() and (time.time() - path.stat().st_mtime) < _TTL_PRECO:
+        try:
+            with open(path, "rb") as f:
+                return pickle.load(f)
+        except Exception:
+            pass
+    return None
+
+
+def _disk_set(chave, valor):
+    path = _CACHE_DIR / f"{chave}.pkl"
+    try:
+        with open(path, "wb") as f:
+            pickle.dump(valor, f)
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Constantes
+# ---------------------------------------------------------------------------
 NOMES = {
     "^BVSP": "Ibovespa",
     "^GSPC": "S&P 500",
@@ -79,8 +131,10 @@ SMLL_TICKERS = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# Funções auxiliares
+# ---------------------------------------------------------------------------
 def nome_amigavel(ticker, nome_busca=None):
-    """Retorna nome amigável para exibição."""
     if ticker in NOMES:
         return NOMES[ticker]
     if nome_busca:
@@ -94,33 +148,93 @@ def nome_amigavel(ticker, nome_busca=None):
     return ticker.replace(".SA", "")
 
 
-@st.cache_data(ttl=3600)
+# ---------------------------------------------------------------------------
+# Download de preços — batch (todos os tickers de uma vez)
+# ---------------------------------------------------------------------------
+@st.cache_data(ttl=_TTL_PRECO)
 def baixar_dados(tickers, inicio, fim, auto_adjust):
+    """Baixa preços de fechamento em lote via yfinance."""
+    chave = _chave("dados", tickers, inicio, fim, auto_adjust)
+    cached = _disk_get_preco(chave)
+    if cached is not None:
+        return cached
+
     dados = {}
     erros = []
-    for ticker in tickers:
-        try:
-            df = yf.download(
-                ticker, start=inicio, end=fim,
-                progress=False, auto_adjust=auto_adjust,
-            )
-            if not df.empty:
-                if isinstance(df.columns, pd.MultiIndex):
-                    df.columns = df.columns.get_level_values(0)
-                dados[ticker] = df["Close"]
+    lista = list(tickers)
+
+    if not lista:
+        return dados, erros
+
+    try:
+        # Download em lote — muito mais rápido que um por um
+        raw = yf.download(
+            lista, start=inicio, end=fim,
+            progress=False, auto_adjust=auto_adjust,
+            group_by="ticker",
+        )
+
+        if raw.empty:
+            erros.append("Sem dados para o período.")
+            return dados, erros
+
+        if len(lista) == 1:
+            # yfinance retorna colunas simples quando só há 1 ticker
+            if isinstance(raw.columns, pd.MultiIndex):
+                raw.columns = raw.columns.get_level_values(0)
+            serie = raw["Close"].dropna()
+            if not serie.empty:
+                dados[lista[0]] = serie
             else:
-                erros.append(f"{ticker}: sem dados para o período")
-        except Exception as e:
-            erros.append(f"{ticker}: {e}")
-    return dados, erros
+                erros.append(f"{lista[0]}: sem dados para o período")
+        else:
+            for ticker in lista:
+                try:
+                    serie = raw[ticker]["Close"].dropna()
+                    if not serie.empty:
+                        dados[ticker] = serie
+                    else:
+                        erros.append(f"{ticker}: sem dados para o período")
+                except Exception:
+                    erros.append(f"{ticker}: sem dados para o período")
+
+    except Exception as e:
+        # Fallback: download individual se o lote falhar
+        for ticker in lista:
+            try:
+                df = yf.download(
+                    ticker, start=inicio, end=fim,
+                    progress=False, auto_adjust=auto_adjust,
+                )
+                if not df.empty:
+                    if isinstance(df.columns, pd.MultiIndex):
+                        df.columns = df.columns.get_level_values(0)
+                    dados[ticker] = df["Close"].dropna()
+                else:
+                    erros.append(f"{ticker}: sem dados para o período")
+            except Exception as e2:
+                erros.append(f"{ticker}: {e2}")
+
+    resultado = (dados, erros)
+    _disk_set(chave, resultado)
+    return resultado
 
 
+# ---------------------------------------------------------------------------
+# Séries do BCB — com cache em disco (12 h)
+# ---------------------------------------------------------------------------
 def _baixar_serie_bcb(serie, inicio_str, fim_str):
-    """Baixa série do BCB em blocos de 10 anos (limite da API)."""
+    """Baixa série do BCB em blocos de 10 anos com cache em disco."""
+    chave = _chave("bcb", serie, inicio_str, fim_str)
+    cached = _disk_get(chave)
+    if cached is not None:
+        return cached
+
     dt_inicio = pd.to_datetime(inicio_str)
     dt_fim = pd.to_datetime(fim_str)
     frames = []
     cursor = dt_inicio
+
     while cursor < dt_fim:
         bloco_fim = min(cursor + timedelta(days=3650), dt_fim)
         url = (
@@ -129,25 +243,35 @@ def _baixar_serie_bcb(serie, inicio_str, fim_str):
             f"&dataInicial={cursor.strftime('%d/%m/%Y')}"
             f"&dataFinal={bloco_fim.strftime('%d/%m/%Y')}"
         )
-        r = requests.get(url, timeout=30)
-        if r.status_code == 200:
-            data = r.json()
-            if isinstance(data, list) and data:
-                frames.append(pd.DataFrame(data))
+        for tentativa in range(3):
+            try:
+                r = requests.get(url, timeout=60)
+                if r.status_code == 200:
+                    data = r.json()
+                    if isinstance(data, list) and data:
+                        frames.append(pd.DataFrame(data))
+                break
+            except requests.exceptions.ReadTimeout:
+                if tentativa == 2:
+                    pass
         cursor = bloco_fim + timedelta(days=1)
+
     if not frames:
         return None
+
     df = pd.concat(frames, ignore_index=True)
     df["data"] = pd.to_datetime(df["data"], format="%d/%m/%Y")
     df["valor"] = df["valor"].astype(float)
     df = df.set_index("data").sort_index()
     df = df[~df.index.duplicated(keep="last")]
-    return df["valor"]
+    resultado = df["valor"]
+
+    _disk_set(chave, resultado)
+    return resultado
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=_TTL_BCB)
 def baixar_cdi(inicio, fim):
-    """Baixa taxa CDI diária do BCB (série 12) e retorna série acumulada base 100."""
     serie = _baixar_serie_bcb(12, inicio, fim)
     if serie is None:
         return None
@@ -157,15 +281,13 @@ def baixar_cdi(inicio, fim):
     return acum
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=_TTL_BCB)
 def baixar_cdi_diario(inicio, fim):
-    """Baixa taxa CDI diária bruta do BCB (série 12)."""
     return _baixar_serie_bcb(12, inicio, fim)
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=_TTL_BCB)
 def baixar_selic(inicio, fim):
-    """Baixa Selic Meta do BCB (série 432)."""
     serie = _baixar_serie_bcb(432, inicio, fim)
     if serie is None:
         return None
@@ -173,9 +295,8 @@ def baixar_selic(inicio, fim):
     return serie
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=_TTL_PRECO)
 def baixar_cambio(inicio, fim):
-    """Baixa câmbio USDBRL via yfinance."""
     df = yf.download("USDBRL=X", start=inicio, end=fim, progress=False)
     if df.empty:
         return None
@@ -184,9 +305,8 @@ def baixar_cambio(inicio, fim):
     return df["Close"]
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=_TTL_BCB)
 def baixar_juro_longo(inicio, fim):
-    """Baixa Swap DI x Pré 5 anos (série 7815 do BCB), interpolado para diário."""
     serie = _baixar_serie_bcb(7815, inicio, fim)
     if serie is None:
         return None
@@ -196,9 +316,8 @@ def baixar_juro_longo(inicio, fim):
     return serie
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=_TTL_PRECO)
 def baixar_taxa_yf(ticker, inicio, fim):
-    """Baixa yield/taxa via yfinance (ex: ^IRX, ^FVX)."""
     df = yf.download(ticker, start=inicio, end=fim, progress=False)
     if df.empty:
         return None
