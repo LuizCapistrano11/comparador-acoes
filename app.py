@@ -705,7 +705,7 @@ df_download = pd.concat(
 )
 df_download.index.name = "Data"
 
-col_csv, col_xlsx = st.columns(2)
+col_csv, col_xlsx, _ = st.columns([1, 1, 4])
 
 # CSV
 csv_buffer = df_download.to_csv(decimal=",", sep=";")
