@@ -12,6 +12,8 @@ from utils import (
     baixar_cambio, baixar_juro_longo, baixar_taxa_yf,
 )
 
+DATA_INICIO_MAX = "2000-01-01"
+
 st.title("Comparador de Ações — Base 100")
 
 # --- Estado persistente dos tickers ---
@@ -40,7 +42,6 @@ def _display_name(ticker):
 # --- Sidebar ---
 st.sidebar.header("Configurações")
 
-# Busca por nome ou ticker
 st.sidebar.subheader("Adicionar ativos")
 busca = st.sidebar.text_input(
     "Buscar por nome ou ticker",
@@ -68,7 +69,6 @@ if busca:
     except Exception:
         st.sidebar.caption("Erro na busca. Tente novamente.")
 
-# Atalhos para tickers populares
 with st.sidebar.expander("Tickers populares"):
     for ticker in TICKERS_POPULARES:
         nome_display = _display_name(ticker)
@@ -83,7 +83,6 @@ with st.sidebar.expander("Tickers populares"):
 
 st.sidebar.markdown("---")
 
-# Ativos no gráfico (com remoção)
 st.sidebar.subheader("Ativos no gráfico")
 if st.session_state.tickers_ativos:
     for ticker in list(st.session_state.tickers_ativos):
@@ -105,15 +104,11 @@ st.sidebar.markdown("---")
 st.sidebar.subheader("Visualização")
 
 ajuste_dividendos = st.sidebar.toggle(
-    "Retorno total (com dividendos)",
-    value=False,
-    help="Inclui dividendos reinvestidos no cálculo de retorno. "
-    "Desativado: apenas variação de preço.",
+    "Retorno total (com dividendos)", value=False,
+    help="Inclui dividendos reinvestidos. Desativado: apenas variação de preço.",
 )
-
 preco_em_dolar = st.sidebar.toggle(
-    "Converter para dólar (USD)",
-    value=False,
+    "Converter para dólar (USD)", value=False,
     help="Converte os preços dos ativos para dólar usando o câmbio USDBRL.",
 )
 
@@ -121,10 +116,8 @@ st.sidebar.markdown("---")
 
 # --- Benchmarks ---
 st.sidebar.subheader("Benchmarks")
-
 mostrar_cdi = st.sidebar.toggle(
-    "CDI acumulado",
-    value=True,
+    "CDI acumulado", value=True,
     help="Rendimento acumulado do CDI no período (base 100).",
 )
 
@@ -132,111 +125,78 @@ st.sidebar.markdown("---")
 
 # --- Indicadores macro ---
 st.sidebar.subheader("Indicadores macro")
-
 mostrar_cambio = st.sidebar.toggle(
-    "Câmbio (USD/BRL)",
-    value=False,
+    "Câmbio (USD/BRL)", value=False,
     help="Cotação do dólar em reais — eixo secundário.",
 )
-
 mostrar_selic = st.sidebar.toggle(
-    "Selic Meta",
-    value=False,
+    "Selic Meta", value=False,
     help="Taxa Selic Meta definida pelo Copom — eixo secundário.",
 )
-
 mostrar_juro_longo = st.sidebar.toggle(
-    "Juro longo Brasil (Swap Pré 5a)",
-    value=False,
-    help="Swap DI x Pré 5 anos — expectativa de juros de longo prazo no Brasil. "
-    "Dados mensais do BCB interpolados para frequência diária.",
+    "Juro longo Brasil (Swap Pré 5a)", value=False,
+    help="Swap DI x Pré 5 anos — dados mensais interpolados para diário.",
 )
-
 mostrar_fed_curto = st.sidebar.toggle(
-    "Fed Rate (T-Bill 13 semanas)",
-    value=False,
-    help="Taxa de juros de curto prazo dos EUA — comparável à Selic/CDI.",
+    "Fed Rate (T-Bill 13 semanas)", value=False,
+    help="Taxa de juros de curto prazo dos EUA — eixo secundário.",
 )
-
 mostrar_fed_longo = st.sidebar.toggle(
-    "Treasury 5 anos (EUA)",
-    value=False,
-    help="Yield do título de 5 anos americano — comparável ao juro longo brasileiro.",
+    "Treasury 5 anos (EUA)", value=False,
+    help="Yield do título de 5 anos americano — eixo secundário.",
 )
 
 st.sidebar.markdown("---")
 
-# --- Período ---
-st.sidebar.subheader("Período")
+# --- Período padrão do slider ---
+st.sidebar.subheader("Período padrão")
 
 periodo_opcoes = {
-    "1 mês": 30,
-    "3 meses": 90,
-    "6 meses": 180,
-    "1 ano": 365,
-    "2 anos": 730,
-    "5 anos": 1825,
-    "10 anos": 3650,
-    "15 anos": 5475,
-    "20 anos": 7300,
-    "25 anos": 9125,
-    "Máximo": 9999,
-    "Personalizado": None,
+    "1 mês": 30, "3 meses": 90, "6 meses": 180,
+    "1 ano": 365, "2 anos": 730, "5 anos": 1825,
+    "10 anos": 3650, "15 anos": 5475, "20 anos": 7300,
+    "25 anos": 9125, "Máximo": 0,
 }
 
-periodo = st.sidebar.selectbox("Período", list(periodo_opcoes.keys()), index=8)
+periodo = st.sidebar.selectbox("Período padrão do gráfico", list(periodo_opcoes.keys()), index=8)
 
-if periodo == "Personalizado":
-    col1, col2 = st.sidebar.columns(2)
-    data_inicio = col1.date_input(
-        "Início",
-        value=date.today() - timedelta(days=365),
-        min_value=date(2000, 1, 1),
-    )
-    data_fim = col2.date_input("Fim", value=date.today())
-else:
-    dias = periodo_opcoes[periodo]
-    data_fim = date.today()
-    data_inicio = data_fim - timedelta(days=dias)
-
-data_inicio = str(data_inicio)
-data_fim = str(data_fim)
-
-# --- Download e processamento ---
+# --- Verificação de tickers ---
 if not tickers_selecionados:
     st.warning("Selecione ao menos um ticker na barra lateral.")
     st.stop()
 
+# --- Download de TODOS os dados desde 2000 ---
+hoje = date.today()
+
 with st.spinner("Baixando dados..."):
     dados, erros = baixar_dados(
-        tuple(tickers_selecionados), data_inicio, data_fim, ajuste_dividendos,
+        tuple(tickers_selecionados), DATA_INICIO_MAX, str(hoje), ajuste_dividendos,
     )
-
-    cambio = None
+    cambio_full = None
     if preco_em_dolar or mostrar_cambio:
-        cambio = baixar_cambio(data_inicio, data_fim)
+        cambio_full = baixar_cambio(DATA_INICIO_MAX, str(hoje))
 
-    cdi_acum = None
-    cdi_diario = None
+    cdi_full = None
+    cdi_diario_full = None
     if mostrar_cdi:
-        cdi_diario = baixar_cdi_diario(data_inicio, data_fim)
-        cdi_acum = baixar_cdi(data_inicio, data_fim)
+        cdi_diario_full = baixar_cdi_diario(DATA_INICIO_MAX, str(hoje))
+        cdi_full = baixar_cdi(DATA_INICIO_MAX, str(hoje))
 
-    selic = None
+    selic_full = None
     if mostrar_selic:
-        selic = baixar_selic(data_inicio, data_fim)
+        selic_full = baixar_selic(DATA_INICIO_MAX, str(hoje))
 
-    juro_longo = None
+    juro_longo_full = None
     if mostrar_juro_longo:
-        juro_longo = baixar_juro_longo(data_inicio, data_fim)
+        juro_longo_full = baixar_juro_longo(DATA_INICIO_MAX, str(hoje))
 
-    fed_curto = None
+    fed_curto_full = None
     if mostrar_fed_curto:
-        fed_curto = baixar_taxa_yf("^IRX", data_inicio, data_fim)
+        fed_curto_full = baixar_taxa_yf("^IRX", DATA_INICIO_MAX, str(hoje))
 
-    fed_longo = None
+    fed_longo_full = None
     if mostrar_fed_longo:
-        fed_longo = baixar_taxa_yf("^FVX", data_inicio, data_fim)
+        fed_longo_full = baixar_taxa_yf("^FVX", DATA_INICIO_MAX, str(hoje))
 
 if erros:
     for erro in erros:
@@ -246,87 +206,69 @@ if not dados:
     st.error("Não foi possível baixar dados para os tickers selecionados.")
     st.stop()
 
-# Montar DataFrame de preços
-df_precos = pd.DataFrame(dados)
-df_precos = df_precos.dropna(how="all")
+# Montar DataFrame e ajustar início ao dado mais antigo disponível
+df_precos_full = pd.DataFrame(dados).dropna(how="all")
+data_inicio_efetiva = df_precos_full.apply(lambda col: col.dropna().index[0]).max()
+df_precos_full = df_precos_full.loc[data_inicio_efetiva:].dropna(how="all")
 
-# Ajustar janela
-data_inicio_efetiva = df_precos.apply(lambda col: col.dropna().index[0]).max()
-df_precos = df_precos.loc[data_inicio_efetiva:]
-df_precos = df_precos.dropna(how="all")
-
-if df_precos.empty:
+if df_precos_full.empty:
     st.error("Não há dados suficientes para o período e ativos selecionados.")
     st.stop()
 
+# --- Slider com histórico máximo disponível ---
+data_min = df_precos_full.index[0].date()
+data_max = df_precos_full.index[-1].date()
 
-def _recortar(serie, inicio):
+dias_padrao = periodo_opcoes[periodo]
+if dias_padrao == 0:
+    default_ini = data_min
+else:
+    default_ini = max(data_min, hoje - timedelta(days=dias_padrao))
+default_fim = data_max
+
+janela = st.slider(
+    "Ajuste a janela de análise",
+    min_value=data_min,
+    max_value=data_max,
+    value=(default_ini, default_fim),
+    format="DD/MM/YYYY",
+)
+dt_ini = pd.Timestamp(janela[0])
+dt_end = pd.Timestamp(janela[1])
+
+# --- Fatiar tudo pela janela do slider ---
+def _slice(serie):
     if serie is None:
         return None
-    serie = serie.loc[serie.index >= inicio]
-    return serie if not serie.empty else None
+    s = serie.loc[(serie.index >= dt_ini) & (serie.index <= dt_end)]
+    return s if not s.empty else None
 
+df_precos = df_precos_full.loc[dt_ini:dt_end]
+cambio = _slice(cambio_full)
+cdi_diario = _slice(cdi_diario_full)
+cdi_acum = _slice(cdi_full)
+selic = _slice(selic_full)
+juro_longo = _slice(juro_longo_full)
+fed_curto = _slice(fed_curto_full)
+fed_longo = _slice(fed_longo_full)
 
-cdi_diario = _recortar(cdi_diario, data_inicio_efetiva)
-cdi_acum = _recortar(cdi_acum, data_inicio_efetiva)
-if cdi_acum is not None:
+if cdi_acum is not None and len(cdi_acum) >= 2:
     cdi_acum = cdi_acum / cdi_acum.iloc[0] * 100
-
-cambio = _recortar(cambio, data_inicio_efetiva)
-selic = _recortar(selic, data_inicio_efetiva)
-juro_longo = _recortar(juro_longo, data_inicio_efetiva)
-fed_curto = _recortar(fed_curto, data_inicio_efetiva)
-fed_longo = _recortar(fed_longo, data_inicio_efetiva)
-
-# Converter para dólar se necessário
-if preco_em_dolar and cambio is not None:
-    cambio_alinhado = cambio.reindex(df_precos.index, method="ffill")
-    df_precos = df_precos.div(cambio_alinhado, axis=0)
-    df_precos = df_precos.dropna(how="all")
-    if cdi_acum is not None:
-        cambio_cdi = cambio.reindex(cdi_acum.index, method="ffill")
-        cdi_em_usd = cdi_acum / cambio_cdi
-        cdi_acum = cdi_em_usd / cdi_em_usd.dropna().iloc[0] * 100
-
-# --- Slider de ajuste fino ---
-datas_disponiveis = df_precos.index
-data_min = datas_disponiveis[0].date()
-data_max = datas_disponiveis[-1].date()
-
-if data_min < data_max:
-    janela = st.slider(
-        "Ajuste a janela de análise",
-        min_value=data_min,
-        max_value=data_max,
-        value=(data_min, data_max),
-        format="DD/MM/YYYY",
-    )
-    dt_ini = pd.Timestamp(janela[0])
-    dt_end = pd.Timestamp(janela[1])
-    df_precos = df_precos.loc[dt_ini:dt_end]
-
-    def _recortar_janela(serie):
-        if serie is None:
-            return None
-        serie = serie.loc[(serie.index >= dt_ini) & (serie.index <= dt_end)]
-        return serie if not serie.empty else None
-
-    cdi_diario = _recortar_janela(cdi_diario)
-    cdi_acum = _recortar_janela(cdi_acum)
-    if cdi_acum is not None:
-        cdi_acum = cdi_acum / cdi_acum.iloc[0] * 100
-
-    cambio = _recortar_janela(cambio)
-    selic = _recortar_janela(selic)
-    juro_longo = _recortar_janela(juro_longo)
-    fed_curto = _recortar_janela(fed_curto)
-    fed_longo = _recortar_janela(fed_longo)
 
 if df_precos.empty or len(df_precos) < 2:
     st.warning("Janela muito curta — selecione um intervalo maior.")
     st.stop()
 
-# Converter para base 100
+# --- Converter para dólar ---
+if preco_em_dolar and cambio is not None:
+    cambio_al = cambio.reindex(df_precos.index, method="ffill")
+    df_precos = df_precos.div(cambio_al, axis=0).dropna(how="all")
+    if cdi_acum is not None:
+        cambio_cdi = cambio.reindex(cdi_acum.index, method="ffill")
+        cdi_em_usd = cdi_acum / cambio_cdi
+        cdi_acum = cdi_em_usd / cdi_em_usd.dropna().iloc[0] * 100
+
+# --- Base 100 ---
 df_base100 = (df_precos / df_precos.iloc[0]) * 100
 
 # --- Gráfico ---
@@ -340,10 +282,7 @@ usar_secundario = (
     or tem_fed_curto_eixo or tem_fed_longo_eixo
 )
 
-if usar_secundario:
-    fig = make_subplots(specs=[[{"secondary_y": True}]])
-else:
-    fig = go.Figure()
+fig = make_subplots(specs=[[{"secondary_y": True}]]) if usar_secundario else go.Figure()
 
 for col in df_base100.columns:
     nome = nome_amigavel(col, st.session_state.nomes_cache.get(col))
@@ -375,7 +314,6 @@ if tem_cambio_eixo:
         ),
         secondary_y=True,
     )
-
 if tem_selic_eixo:
     fig.add_trace(
         go.Scatter(
@@ -385,7 +323,6 @@ if tem_selic_eixo:
         ),
         secondary_y=True,
     )
-
 if tem_juro_eixo:
     fig.add_trace(
         go.Scatter(
@@ -395,7 +332,6 @@ if tem_juro_eixo:
         ),
         secondary_y=True,
     )
-
 if tem_fed_curto_eixo:
     fig.add_trace(
         go.Scatter(
@@ -405,7 +341,6 @@ if tem_fed_curto_eixo:
         ),
         secondary_y=True,
     )
-
 if tem_fed_longo_eixo:
     fig.add_trace(
         go.Scatter(
@@ -446,40 +381,36 @@ st.plotly_chart(
 # --- Download dos dados ---
 moeda_label = "USD" if preco_em_dolar else "BRL"
 
-df_base100_download = pd.DataFrame()
+df_b100_dl = pd.DataFrame()
 for col in df_base100.columns:
     nome = nome_amigavel(col, st.session_state.nomes_cache.get(col))
-    df_base100_download[f"{nome} (base 100)"] = df_base100[col]
-
+    df_b100_dl[f"{nome} (base 100)"] = df_base100[col]
 if mostrar_cdi and cdi_acum is not None:
-    df_base100_download["CDI (base 100)"] = cdi_acum
-
+    df_b100_dl["CDI (base 100)"] = cdi_acum
 if tem_cambio_eixo:
-    cambio_base100 = (cambio / cambio.dropna().iloc[0]) * 100
-    df_base100_download["Câmbio USD/BRL (base 100)"] = cambio_base100
+    cambio_b100 = (cambio / cambio.dropna().iloc[0]) * 100
+    df_b100_dl["Câmbio USD/BRL (base 100)"] = cambio_b100
 
-df_precos_download = pd.DataFrame()
+df_precos_dl = pd.DataFrame()
 for col in df_precos.columns:
     nome = nome_amigavel(col, st.session_state.nomes_cache.get(col))
-    df_precos_download[f"{nome} ({moeda_label})"] = df_precos[col]
+    df_precos_dl[f"{nome} ({moeda_label})"] = df_precos[col]
 
-df_indicadores = pd.DataFrame()
+df_ind = pd.DataFrame()
 if mostrar_cdi and cdi_diario is not None:
-    df_indicadores["CDI (taxa diária %)"] = cdi_diario
+    df_ind["CDI (taxa diária %)"] = cdi_diario
 if tem_cambio_eixo:
-    df_indicadores["Câmbio USD/BRL (R$)"] = cambio
+    df_ind["Câmbio USD/BRL (R$)"] = cambio
 if tem_selic_eixo:
-    df_indicadores["Selic Meta (% a.a.)"] = selic
+    df_ind["Selic Meta (% a.a.)"] = selic
 if tem_juro_eixo:
-    df_indicadores["Juro Longo BR — Swap Pré 5a (% a.a.)"] = juro_longo
+    df_ind["Juro Longo BR — Swap Pré 5a (% a.a.)"] = juro_longo
 if tem_fed_curto_eixo:
-    df_indicadores["Fed Rate — T-Bill 13w (%)"] = fed_curto
+    df_ind["Fed Rate — T-Bill 13w (%)"] = fed_curto
 if tem_fed_longo_eixo:
-    df_indicadores["Treasury 5Y EUA (%)"] = fed_longo
+    df_ind["Treasury 5Y EUA (%)"] = fed_longo
 
-df_download = pd.concat(
-    [df_base100_download, df_precos_download, df_indicadores], axis=1,
-)
+df_download = pd.concat([df_b100_dl, df_precos_dl, df_ind], axis=1)
 df_download.index.name = "Data"
 
 col_csv, col_xlsx, _ = st.columns([1, 1, 6], gap="small")
@@ -500,7 +431,7 @@ col_xlsx.download_button(
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
 
-# --- Tabela de resumo ---
+# --- Resumo ---
 st.subheader("Resumo do Período")
 
 resumo = []
@@ -509,22 +440,18 @@ for col in df_base100.columns:
     serie = df_base100[col].dropna()
     if len(serie) < 2:
         continue
-    retorno = serie.iloc[-1] - 100
-    maximo = serie.max() - 100
-    minimo = serie.min() - 100
     resumo.append({
         "Ativo": nome,
-        "Retorno (%)": f"{retorno:+.2f}%",
-        "Máx. (%)": f"{maximo:+.2f}%",
-        "Mín. (%)": f"{minimo:+.2f}%",
+        "Retorno (%)": f"{serie.iloc[-1] - 100:+.2f}%",
+        "Máx. (%)": f"{serie.max() - 100:+.2f}%",
+        "Mín. (%)": f"{serie.min() - 100:+.2f}%",
         "Último Valor": f"{serie.iloc[-1]:.2f}",
     })
 
 if mostrar_cdi and cdi_acum is not None and len(cdi_acum) >= 2:
-    retorno_cdi = cdi_acum.iloc[-1] - 100
     resumo.append({
         "Ativo": "CDI",
-        "Retorno (%)": f"{retorno_cdi:+.2f}%",
+        "Retorno (%)": f"{cdi_acum.iloc[-1] - 100:+.2f}%",
         "Máx. (%)": f"{cdi_acum.max() - 100:+.2f}%",
         "Mín. (%)": f"{cdi_acum.min() - 100:+.2f}%",
         "Último Valor": f"{cdi_acum.iloc[-1]:.2f}",

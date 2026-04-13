@@ -388,6 +388,14 @@ with tab_ranking:
     top_n = col_a3.slider("Quantidade de ativos", min_value=3, max_value=20, value=5)
     direcao = col_a4.radio("Ordenação", ["Melhores", "Piores"], horizontal=True)
 
+    # Invalidar resultados se os parâmetros do ranking mudarem
+    _params_ranking = (universo_nome, metrica_nome, top_n, direcao, str(data_inicio))
+    if st.session_state.get("_ranking_params") != _params_ranking:
+        st.session_state["_ranking_params"] = _params_ranking
+        st.session_state["_ranking_df"] = None
+        st.session_state["_ranking_df_full"] = None
+        st.session_state["_ranking_meta"] = None
+
     if st.button("Rodar análise", key="btn_ranking"):
         metrica_key = METRICAS[metrica_nome]
         universo = UNIVERSOS[universo_nome]
@@ -458,15 +466,10 @@ with tab_ranking:
                 ascendente = direcao == "Piores"
 
             df_resultados = df_resultados.sort_values("_ranking", ascending=ascendente).head(top_n)
-
             label = "Top" if direcao == "Melhores" else "Bottom"
-            st.subheader(f"{label} {top_n} — {metrica_nome}")
-            st.dataframe(_formatar_tabela(df_resultados), use_container_width=True, hide_index=True)
 
-            # --- Gráfico com slider de histórico máximo ---
-            st.subheader("Performance comparada")
+            # Baixar histórico máximo para os rankeados
             tickers_top = df_resultados["ticker"].tolist()
-
             dados_full, _ = baixar_dados(
                 tuple(tickers_top), DATA_INICIO_MAX, str(data_fim), use_adj,
             )
@@ -474,17 +477,34 @@ with tab_ranking:
                 {t: dados_full[t] for t in tickers_top if t in dados_full}
             ).dropna(how="all")
 
-            if not df_full.empty:
-                dt_ini, dt_end = _slider_janela(df_full, data_inicio, data_fim, "slider_ranking")
-                df_janela = df_full.loc[dt_ini:dt_end]
+            # Guardar resultados no session_state
+            st.session_state["_ranking_df"] = df_resultados
+            st.session_state["_ranking_df_full"] = df_full
+            st.session_state["_ranking_meta"] = {
+                "label": label, "top_n": top_n, "metrica_nome": metrica_nome,
+            }
 
-                if not df_janela.empty and len(df_janela) >= 2:
-                    plotar_base100_com_macro(
-                        df_janela,
-                        f"{label} {top_n} — {metrica_nome}",
-                        dt_ini, dt_end,
-                        key_prefix="ranking",
-                    )
+    # --- Exibir resultados (persiste quando o slider muda) ---
+    if st.session_state.get("_ranking_df") is not None:
+        df_resultados = st.session_state["_ranking_df"]
+        df_full = st.session_state["_ranking_df_full"]
+        meta = st.session_state["_ranking_meta"]
+        label, top_n_r, metrica_r = meta["label"], meta["top_n"], meta["metrica_nome"]
+
+        st.subheader(f"{label} {top_n_r} — {metrica_r}")
+        st.dataframe(_formatar_tabela(df_resultados), use_container_width=True, hide_index=True)
+
+        st.subheader("Performance comparada")
+        if not df_full.empty:
+            dt_ini, dt_end = _slider_janela(df_full, data_inicio, data_fim, "slider_ranking")
+            df_janela = df_full.loc[dt_ini:dt_end]
+            if not df_janela.empty and len(df_janela) >= 2:
+                plotar_base100_com_macro(
+                    df_janela,
+                    f"{label} {top_n_r} — {metrica_r}",
+                    dt_ini, dt_end,
+                    key_prefix="ranking",
+                )
 
 # =====================================================================
 # ABA 2 — Ações que bateram o CDI
@@ -507,6 +527,14 @@ with tab_cdi:
         help="Quantos ativos exibir no gráfico (ordenados por maior alpha vs CDI).",
         key="cdi_top_chart",
     )
+
+    # Invalidar se parâmetros mudarem
+    _params_cdi = (str(data_inicio), usar_retorno_total)
+    if st.session_state.get("_cdi_params") != _params_cdi:
+        st.session_state["_cdi_params"] = _params_cdi
+        st.session_state["_cdi_df_venc"] = None
+        st.session_state["_cdi_df_full"] = None
+        st.session_state["_cdi_resumo"] = None
 
     if st.button("Buscar ações que bateram o CDI", key="btn_cdi"):
         with st.spinner(f"Analisando {len(BOLSA_BR)} ações contra o CDI..."):
@@ -555,12 +583,6 @@ with tab_cdi:
                     perdedores_count += 1
 
             total_analisados = len(vencedores) + perdedores_count
-            st.markdown(
-                f"**{len(vencedores)}** de **{total_analisados}** ações bateram o CDI "
-                f"(**{cdi_retorno_pct:+.2f}%**) no período.  \n"
-                f"{perdedores_count} ficaram abaixo do CDI"
-                + (f" e {sem_dados_count} não tinham dados suficientes." if sem_dados_count else ".")
-            )
 
             if not vencedores:
                 st.info("Nenhuma ação bateu o CDI no período selecionado.")
@@ -568,33 +590,57 @@ with tab_cdi:
 
             df_venc = pd.DataFrame(vencedores).sort_values("Alpha vs CDI (%)", ascending=False)
 
-            df_show = df_venc[["Ativo"]].copy()
-            df_show["Retorno"] = df_venc["Retorno (%)"].map(lambda x: f"{x:+.2f}%")
-            df_show["CDI"] = df_venc["CDI (%)"].map(lambda x: f"{x:+.2f}%")
-            df_show["Alpha vs CDI"] = df_venc["Alpha vs CDI (%)"].map(lambda x: f"{x:+.2f}%")
-            df_show["Volatilidade"] = df_venc["Volatilidade (% a.a.)"].map(lambda x: f"{x:.2f}%")
-            df_show["Drawdown Máx."] = df_venc["Drawdown Máx. (%)"].map(lambda x: f"{x:.2f}%")
-            st.dataframe(df_show, use_container_width=True, hide_index=True)
-
-            # --- Gráfico com slider de histórico máximo ---
-            st.subheader("Performance comparada (top alpha vs CDI)")
-            tickers_chart = df_venc["ticker"].head(top_n_chart).tolist()
-
+            # Baixar histórico máximo para os top ativos do gráfico
+            tickers_todos = df_venc["ticker"].tolist()
             dados_full, _ = baixar_dados(
-                tuple(tickers_chart), DATA_INICIO_MAX, str(data_fim), usar_retorno_total,
+                tuple(tickers_todos[:30]), DATA_INICIO_MAX, str(data_fim), usar_retorno_total,
             )
             df_full = pd.DataFrame(
-                {t: dados_full[t] for t in tickers_chart if t in dados_full}
+                {t: dados_full[t] for t in tickers_todos[:30] if t in dados_full}
             ).dropna(how="all")
 
-            if not df_full.empty:
-                dt_ini, dt_end = _slider_janela(df_full, data_inicio, data_fim, "slider_cdi")
-                df_janela = df_full.loc[dt_ini:dt_end]
+            # Guardar no session_state
+            st.session_state["_cdi_df_venc"] = df_venc
+            st.session_state["_cdi_df_full"] = df_full
+            st.session_state["_cdi_resumo"] = (
+                total_analisados, perdedores_count, sem_dados_count, cdi_retorno_pct
+            )
 
-                if not df_janela.empty and len(df_janela) >= 2:
-                    plotar_base100_com_macro(
-                        df_janela,
-                        f"Top {min(top_n_chart, len(tickers_chart))} ações que bateram o CDI",
-                        dt_ini, dt_end,
-                        key_prefix="cdi",
-                    )
+    # --- Exibir resultados (persiste quando o slider ou top_n_chart muda) ---
+    if st.session_state.get("_cdi_df_venc") is not None:
+        df_venc = st.session_state["_cdi_df_venc"]
+        df_full = st.session_state["_cdi_df_full"]
+        total_an, perd, sem_dados, cdi_ret = st.session_state["_cdi_resumo"]
+
+        st.markdown(
+            f"**{len(df_venc)}** de **{total_an}** ações bateram o CDI "
+            f"(**{cdi_ret:+.2f}%**) no período.  \n"
+            f"{perd} ficaram abaixo do CDI"
+            + (f" e {sem_dados} não tinham dados suficientes." if sem_dados else ".")
+        )
+
+        df_show = df_venc[["Ativo"]].copy()
+        df_show["Retorno"] = df_venc["Retorno (%)"].map(lambda x: f"{x:+.2f}%")
+        df_show["CDI"] = df_venc["CDI (%)"].map(lambda x: f"{x:+.2f}%")
+        df_show["Alpha vs CDI"] = df_venc["Alpha vs CDI (%)"].map(lambda x: f"{x:+.2f}%")
+        df_show["Volatilidade"] = df_venc["Volatilidade (% a.a.)"].map(lambda x: f"{x:.2f}%")
+        df_show["Drawdown Máx."] = df_venc["Drawdown Máx. (%)"].map(lambda x: f"{x:.2f}%")
+        st.dataframe(df_show, use_container_width=True, hide_index=True)
+
+        st.subheader("Performance comparada (top alpha vs CDI)")
+        tickers_chart = df_venc["ticker"].head(top_n_chart).tolist()
+
+        # Filtrar df_full aos tickers do gráfico (top_n_chart pode ter mudado)
+        cols_disp = [t for t in tickers_chart if t in df_full.columns]
+        df_full_chart = df_full[cols_disp].dropna(how="all") if cols_disp else pd.DataFrame()
+
+        if not df_full_chart.empty:
+            dt_ini, dt_end = _slider_janela(df_full_chart, data_inicio, data_fim, "slider_cdi")
+            df_janela = df_full_chart.loc[dt_ini:dt_end]
+            if not df_janela.empty and len(df_janela) >= 2:
+                plotar_base100_com_macro(
+                    df_janela,
+                    f"Top {len(cols_disp)} ações que bateram o CDI",
+                    dt_ini, dt_end,
+                    key_prefix="cdi",
+                )
