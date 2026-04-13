@@ -383,7 +383,9 @@ with st.spinner("Baixando dados..."):
         cambio = baixar_cambio(data_inicio, data_fim)
 
     cdi_acum = None
+    cdi_diario = None
     if mostrar_cdi:
+        cdi_diario = _baixar_serie_bcb(12, data_inicio, data_fim)
         cdi_acum = baixar_cdi(data_inicio, data_fim)
 
     selic = None
@@ -430,6 +432,7 @@ def _recortar(serie, inicio):
     serie = serie.loc[serie.index >= inicio]
     return serie if not serie.empty else None
 
+cdi_diario = _recortar(cdi_diario, data_inicio_efetiva)
 cdi_acum = _recortar(cdi_acum, data_inicio_efetiva)
 if cdi_acum is not None:
     cdi_acum = cdi_acum / cdi_acum.iloc[0] * 100
@@ -473,6 +476,7 @@ if data_min < data_max:
         serie = serie.loc[(serie.index >= dt_ini) & (serie.index <= dt_end)]
         return serie if not serie.empty else None
 
+    cdi_diario = _recortar_janela(cdi_diario)
     cdi_acum = _recortar_janela(cdi_acum)
     if cdi_acum is not None:
         cdi_acum = cdi_acum / cdi_acum.iloc[0] * 100
@@ -654,31 +658,51 @@ st.plotly_chart(
 # --- Download dos dados ---
 moeda_label = "USD" if preco_em_dolar else "BRL"
 
-# Montar DataFrame para download
-df_download = pd.DataFrame()
+# Bloco 1: Base 100 (ativos + CDI + câmbio se aplicável)
+df_base100_download = pd.DataFrame()
+for col in df_base100.columns:
+    nome = nome_amigavel(col, st.session_state.nomes_cache.get(col))
+    df_base100_download[f"{nome} (base 100)"] = df_base100[col]
 
-# Preços e base 100 dos ativos
+if mostrar_cdi and cdi_acum is not None:
+    df_base100_download["CDI (base 100)"] = cdi_acum
+
+if tem_cambio_eixo:
+    cambio_base100 = (cambio / cambio.dropna().iloc[0]) * 100
+    df_base100_download["Câmbio USD/BRL (base 100)"] = cambio_base100
+
+# Bloco 2: Preços originais
+df_precos_download = pd.DataFrame()
 for col in df_precos.columns:
     nome = nome_amigavel(col, st.session_state.nomes_cache.get(col))
-    df_download[f"{nome} — Preço ({moeda_label})"] = df_precos[col]
-    df_download[f"{nome} — Base 100"] = df_base100[col]
+    df_precos_download[f"{nome} ({moeda_label})"] = df_precos[col]
 
-# CDI
-if mostrar_cdi and cdi_acum is not None:
-    df_download["CDI — Base 100"] = cdi_acum
+# Bloco 3: Indicadores e taxas
+df_indicadores = pd.DataFrame()
 
-# Indicadores macro
+if mostrar_cdi and cdi_diario is not None:
+    df_indicadores["CDI (taxa diária %)"] = cdi_diario
+
 if tem_cambio_eixo:
-    df_download["Câmbio USD/BRL (R$)"] = cambio
-if tem_selic_eixo:
-    df_download["Selic Meta (% a.a.)"] = selic
-if tem_juro_eixo:
-    df_download["Juro Longo BR — Swap Pré 5a (% a.a.)"] = juro_longo
-if tem_fed_curto_eixo:
-    df_download["Fed Rate — T-Bill 13w (%)"] = fed_curto
-if tem_fed_longo_eixo:
-    df_download["Treasury 5Y EUA (%)"] = fed_longo
+    df_indicadores["Câmbio USD/BRL (R$)"] = cambio
 
+if tem_selic_eixo:
+    df_indicadores["Selic Meta (% a.a.)"] = selic
+
+if tem_juro_eixo:
+    df_indicadores["Juro Longo BR — Swap Pré 5a (% a.a.)"] = juro_longo
+
+if tem_fed_curto_eixo:
+    df_indicadores["Fed Rate — T-Bill 13w (%)"] = fed_curto
+
+if tem_fed_longo_eixo:
+    df_indicadores["Treasury 5Y EUA (%)"] = fed_longo
+
+# Juntar tudo: Base 100 | Preços | Indicadores
+df_download = pd.concat(
+    [df_base100_download, df_precos_download, df_indicadores],
+    axis=1,
+)
 df_download.index.name = "Data"
 
 col_csv, col_xlsx = st.columns(2)
