@@ -765,3 +765,257 @@ if mostrar_cdi and cdi_acum is not None and len(cdi_acum) >= 2:
 
 if resumo:
     st.dataframe(pd.DataFrame(resumo), use_container_width=True, hide_index=True)
+
+# =====================================================================
+# MÓDULO DE ANÁLISE — Screening de ativos
+# =====================================================================
+
+st.markdown("---")
+st.header("Análise de ativos")
+
+IBOVESPA_TICKERS = [
+    "ABEV3.SA", "ALPA4.SA", "AMOB3.SA", "ASAI3.SA", "AZUL4.SA",
+    "B3SA3.SA", "BBAS3.SA", "BBDC4.SA", "BBSE3.SA", "BEEF3.SA",
+    "BPAC11.SA", "BRAV3.SA", "BRFS3.SA", "BRKM5.SA", "CCRO3.SA",
+    "CMIN3.SA", "CMIG4.SA", "COGN3.SA", "CPFE3.SA", "CPLE6.SA",
+    "CRFB3.SA", "CSAN3.SA", "CSNA3.SA", "CYRE3.SA", "DXCO3.SA",
+    "ELET3.SA", "ELET6.SA", "EMBR3.SA", "ENEV3.SA", "ENGI11.SA",
+    "EQTL3.SA", "GGBR4.SA", "GOAU4.SA", "HAPV3.SA", "HYPE3.SA",
+    "IGTI11.SA", "IRBR3.SA", "ISAE4.SA", "ITSA4.SA", "ITUB4.SA",
+    "JBSS3.SA", "KLBN11.SA", "LREN3.SA", "LWSA3.SA", "MGLU3.SA",
+    "MRFG3.SA", "MRVE3.SA", "MULT3.SA", "NTCO3.SA", "PCAR3.SA",
+    "PETR3.SA", "PETR4.SA", "PETZ3.SA", "PRIO3.SA", "RADL3.SA",
+    "RAIZ4.SA", "RAIL3.SA", "RDOR3.SA", "RENT3.SA", "SANB11.SA",
+    "SBSP3.SA", "SLCE3.SA", "SMTO3.SA", "SUZB3.SA", "TAEE11.SA",
+    "TIMS3.SA", "TOTS3.SA", "UGPA3.SA", "USIM5.SA", "VALE3.SA",
+    "VBBR3.SA", "VIVT3.SA", "WEGE3.SA", "YDUQ3.SA",
+]
+
+SP500_TOP50 = [
+    "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "BRK-B",
+    "UNH", "JNJ", "V", "XOM", "JPM", "PG", "MA", "HD", "CVX", "MRK",
+    "ABBV", "LLY", "PEP", "KO", "COST", "AVGO", "WMT", "MCD", "CSCO",
+    "ACN", "TMO", "ABT", "DHR", "CRM", "NFLX", "AMD", "INTC", "CMCSA",
+    "VZ", "ADBE", "NKE", "TXN", "PM", "NEE", "UPS", "RTX", "LOW",
+    "ORCL", "QCOM", "BA", "CAT", "GS",
+]
+
+UNIVERSOS = {
+    "Ibovespa": IBOVESPA_TICKERS,
+    "S&P 500 (Top 50)": SP500_TOP50,
+}
+
+METRICAS = {
+    "Retorno de preço": "retorno_preco",
+    "Retorno total (com dividendos)": "retorno_total",
+    "Retorno vs CDI (alpha)": "alpha_cdi",
+    "Retorno vs Ibovespa (alpha)": "alpha_ibov",
+    "Volatilidade anualizada": "volatilidade",
+    "Drawdown máximo": "drawdown_max",
+    "Sharpe (retorno / volatilidade)": "sharpe",
+    "Liquidez (volume médio 3 meses, R$)": "liquidez",
+}
+
+col_a1, col_a2 = st.columns(2)
+
+universo_nome = col_a1.selectbox("Universo de ativos", list(UNIVERSOS.keys()))
+metrica_nome = col_a2.selectbox("Métrica de ranking", list(METRICAS.keys()))
+
+col_a3, col_a4 = st.columns(2)
+top_n = col_a3.slider("Quantidade de ativos", min_value=3, max_value=20, value=5)
+direcao = col_a4.radio("Ordenação", ["Melhores", "Piores"], horizontal=True)
+
+rodar_analise = st.button("Rodar análise")
+
+if rodar_analise:
+    metrica_key = METRICAS[metrica_nome]
+    universo = UNIVERSOS[universo_nome]
+
+    with st.spinner(f"Analisando {len(universo)} ativos..."):
+        # Baixar dados de todos os ativos do universo
+        use_adj = metrica_key == "retorno_total"
+        dados_univ, _ = baixar_dados(
+            tuple(universo), data_inicio, data_fim, use_adj,
+        )
+
+        if not dados_univ:
+            st.error("Não foi possível baixar dados do universo selecionado.")
+            st.stop()
+
+        # Baixar CDI e Ibovespa se necessário para as métricas
+        cdi_para_analise = None
+        if metrica_key in ("alpha_cdi", "sharpe"):
+            cdi_para_analise = baixar_cdi(data_inicio, data_fim)
+
+        ibov_para_analise = None
+        if metrica_key == "alpha_ibov":
+            df_ibov = yf.download(
+                "^BVSP", start=data_inicio, end=data_fim,
+                progress=False, auto_adjust=use_adj,
+            )
+            if not df_ibov.empty:
+                if isinstance(df_ibov.columns, pd.MultiIndex):
+                    df_ibov.columns = df_ibov.columns.get_level_values(0)
+                ibov_para_analise = df_ibov["Close"]
+
+        # Calcular métricas para cada ativo
+        resultados = []
+        for ticker, serie in dados_univ.items():
+            serie = serie.dropna()
+            if len(serie) < 20:
+                continue
+
+            nome = nome_amigavel(ticker)
+            retorno_pct = (serie.iloc[-1] / serie.iloc[0] - 1) * 100
+            retornos_diarios = serie.pct_change().dropna()
+            vol = retornos_diarios.std() * (252 ** 0.5) * 100
+
+            # Drawdown máximo
+            pico = serie.cummax()
+            dd = ((serie - pico) / pico) * 100
+            dd_max = dd.min()
+
+            # Volume médio 3 meses (usando dados separados sem ajuste)
+            try:
+                df_vol = yf.download(
+                    ticker, start=data_inicio, end=data_fim,
+                    progress=False, auto_adjust=False,
+                )
+                if isinstance(df_vol.columns, pd.MultiIndex):
+                    df_vol.columns = df_vol.columns.get_level_values(0)
+                if not df_vol.empty and "Volume" in df_vol.columns and "Close" in df_vol.columns:
+                    vol_financeiro = df_vol["Volume"] * df_vol["Close"]
+                    liquidez_3m = vol_financeiro.tail(63).mean()
+                else:
+                    liquidez_3m = 0
+            except Exception:
+                liquidez_3m = 0
+
+            # Alpha vs CDI
+            alpha_cdi_val = None
+            if cdi_para_analise is not None and len(cdi_para_analise) >= 2:
+                cdi_retorno = (cdi_para_analise.iloc[-1] / cdi_para_analise.iloc[0] - 1) * 100
+                alpha_cdi_val = retorno_pct - cdi_retorno
+
+            # Alpha vs Ibovespa
+            alpha_ibov_val = None
+            if ibov_para_analise is not None and len(ibov_para_analise) >= 2:
+                ibov_retorno = (ibov_para_analise.iloc[-1] / ibov_para_analise.iloc[0] - 1) * 100
+                alpha_ibov_val = retorno_pct - ibov_retorno
+
+            # Sharpe
+            sharpe_val = None
+            if cdi_para_analise is not None and len(cdi_para_analise) >= 2 and vol > 0:
+                cdi_retorno = (cdi_para_analise.iloc[-1] / cdi_para_analise.iloc[0] - 1) * 100
+                sharpe_val = (retorno_pct - cdi_retorno) / vol
+
+            # Valor da métrica para ranking
+            if metrica_key == "retorno_preco" or metrica_key == "retorno_total":
+                valor_ranking = retorno_pct
+            elif metrica_key == "alpha_cdi":
+                valor_ranking = alpha_cdi_val if alpha_cdi_val is not None else -9999
+            elif metrica_key == "alpha_ibov":
+                valor_ranking = alpha_ibov_val if alpha_ibov_val is not None else -9999
+            elif metrica_key == "volatilidade":
+                valor_ranking = vol
+            elif metrica_key == "drawdown_max":
+                valor_ranking = dd_max
+            elif metrica_key == "sharpe":
+                valor_ranking = sharpe_val if sharpe_val is not None else -9999
+            elif metrica_key == "liquidez":
+                valor_ranking = liquidez_3m
+            else:
+                valor_ranking = retorno_pct
+
+            resultados.append({
+                "ticker": ticker,
+                "Ativo": nome,
+                "Retorno (%)": retorno_pct,
+                "Volatilidade (% a.a.)": vol,
+                "Drawdown Máx. (%)": dd_max,
+                "Sharpe": sharpe_val,
+                "Alpha vs CDI (%)": alpha_cdi_val,
+                "Alpha vs Ibov (%)": alpha_ibov_val,
+                "Liquidez Média 3M (R$)": liquidez_3m,
+                "_ranking": valor_ranking,
+            })
+
+        if not resultados:
+            st.error("Nenhum ativo com dados suficientes no período.")
+            st.stop()
+
+        df_resultados = pd.DataFrame(resultados)
+
+        # Ordenar
+        ascendente = direcao == "Piores"
+        if metrica_key == "volatilidade":
+            ascendente = direcao == "Melhores"  # menor vol = melhor
+        if metrica_key == "drawdown_max":
+            ascendente = direcao == "Piores"  # maior dd (menos negativo) = pior
+
+        df_resultados = df_resultados.sort_values(
+            "_ranking", ascending=ascendente,
+        ).head(top_n)
+
+        # Tabela de resultados
+        st.subheader(f"{'Top' if direcao == 'Melhores' else 'Bottom'} {top_n} — {metrica_nome}")
+
+        df_display = df_resultados[["Ativo"]].copy()
+        df_display["Retorno"] = df_resultados["Retorno (%)"].map(lambda x: f"{x:+.2f}%")
+        df_display["Volatilidade"] = df_resultados["Volatilidade (% a.a.)"].map(lambda x: f"{x:.2f}%")
+        df_display["Drawdown Máx."] = df_resultados["Drawdown Máx. (%)"].map(lambda x: f"{x:.2f}%")
+        if df_resultados["Sharpe"].notna().any():
+            df_display["Sharpe"] = df_resultados["Sharpe"].map(
+                lambda x: f"{x:.2f}" if x is not None else "—"
+            )
+        if df_resultados["Alpha vs CDI (%)"].notna().any():
+            df_display["Alpha vs CDI"] = df_resultados["Alpha vs CDI (%)"].map(
+                lambda x: f"{x:+.2f}%" if x is not None else "—"
+            )
+        if df_resultados["Alpha vs Ibov (%)"].notna().any():
+            df_display["Alpha vs Ibov"] = df_resultados["Alpha vs Ibov (%)"].map(
+                lambda x: f"{x:+.2f}%" if x is not None else "—"
+            )
+        df_display["Liquidez 3M (R$)"] = df_resultados["Liquidez Média 3M (R$)"].map(
+            lambda x: f"{x:,.0f}".replace(",", ".") if x else "—"
+        )
+
+        st.dataframe(df_display, use_container_width=True, hide_index=True)
+
+        # Plotar gráfico base 100 dos ativos rankeados
+        st.subheader("Performance comparada")
+        tickers_top = df_resultados["ticker"].tolist()
+        fig_analise = go.Figure()
+
+        for ticker in tickers_top:
+            if ticker in dados_univ:
+                serie = dados_univ[ticker].dropna()
+                serie_base100 = (serie / serie.iloc[0]) * 100
+                nome = nome_amigavel(ticker)
+                fig_analise.add_trace(
+                    go.Scatter(
+                        x=serie_base100.index,
+                        y=serie_base100,
+                        mode="lines",
+                        name=nome,
+                        hovertemplate=f"<b>{nome}</b><br>"
+                        + "Data: %{x|%d/%m/%Y}<br>"
+                        + "Base 100: %{y:.2f}<extra></extra>",
+                    )
+                )
+
+        fig_analise.add_hline(y=100, line_dash="dash", line_color="gray", opacity=0.5)
+        fig_analise.update_layout(
+            title=f"{'Top' if direcao == 'Melhores' else 'Bottom'} {top_n} — {metrica_nome} (Base 100)",
+            xaxis_title="Data",
+            yaxis_title="Base 100",
+            hovermode="x unified",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            height=500,
+            dragmode="pan",
+        )
+        st.plotly_chart(
+            fig_analise,
+            use_container_width=True,
+            config={"scrollZoom": False, "modeBarButtonsToRemove": ["zoom2d", "select2d", "lasso2d"]},
+        )
