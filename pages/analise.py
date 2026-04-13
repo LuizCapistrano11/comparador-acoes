@@ -45,10 +45,26 @@ PERIODOS = {
     "20 anos": 7300, "25 anos": 9125,
 }
 
+PERIODOS["Personalizado"] = None
+
 periodo_nome = st.sidebar.selectbox("Período", list(PERIODOS.keys()), index=3)
-dias = PERIODOS[periodo_nome]
-data_fim = date.today()
-data_inicio = data_fim - timedelta(days=dias)
+
+if periodo_nome == "Personalizado":
+    col_d1, col_d2 = st.sidebar.columns(2)
+    data_inicio = col_d1.date_input(
+        "Início", value=date.today() - timedelta(days=365),
+        min_value=date(2000, 1, 1), max_value=date.today(),
+        key="analise_data_inicio",
+    )
+    data_fim = col_d2.date_input(
+        "Fim", value=date.today(),
+        min_value=date(2000, 1, 1), max_value=date.today(),
+        key="analise_data_fim",
+    )
+else:
+    dias = PERIODOS[periodo_nome]
+    data_fim = date.today()
+    data_inicio = data_fim - timedelta(days=dias)
 
 st.sidebar.caption(
     f"Ranking calculado de {data_inicio.strftime('%d/%m/%Y')} "
