@@ -1,3 +1,4 @@
+import io
 import streamlit as st
 import yfinance as yf
 import plotly.graph_objects as go
@@ -648,6 +649,59 @@ st.plotly_chart(
     fig,
     use_container_width=True,
     config={"scrollZoom": False, "modeBarButtonsToRemove": ["zoom2d", "select2d", "lasso2d"]},
+)
+
+# --- Download dos dados ---
+moeda_label = "USD" if preco_em_dolar else "BRL"
+
+# Montar DataFrame para download
+df_download = pd.DataFrame()
+
+# Preços e base 100 dos ativos
+for col in df_precos.columns:
+    nome = nome_amigavel(col, st.session_state.nomes_cache.get(col))
+    df_download[f"{nome} — Preço ({moeda_label})"] = df_precos[col]
+    df_download[f"{nome} — Base 100"] = df_base100[col]
+
+# CDI
+if mostrar_cdi and cdi_acum is not None:
+    df_download["CDI — Base 100"] = cdi_acum
+
+# Indicadores macro
+if tem_cambio_eixo:
+    df_download["Câmbio USD/BRL (R$)"] = cambio
+if tem_selic_eixo:
+    df_download["Selic Meta (% a.a.)"] = selic
+if tem_juro_eixo:
+    df_download["Juro Longo BR — Swap Pré 5a (% a.a.)"] = juro_longo
+if tem_fed_curto_eixo:
+    df_download["Fed Rate — T-Bill 13w (%)"] = fed_curto
+if tem_fed_longo_eixo:
+    df_download["Treasury 5Y EUA (%)"] = fed_longo
+
+df_download.index.name = "Data"
+
+col_csv, col_xlsx = st.columns(2)
+
+# CSV
+csv_buffer = df_download.to_csv(decimal=",", sep=";")
+col_csv.download_button(
+    label="Baixar CSV",
+    data=csv_buffer,
+    file_name="comparador_acoes.csv",
+    mime="text/csv",
+)
+
+# Excel
+xlsx_buffer = io.BytesIO()
+with pd.ExcelWriter(xlsx_buffer, engine="openpyxl") as writer:
+    df_download.to_excel(writer, sheet_name="Dados")
+xlsx_buffer.seek(0)
+col_xlsx.download_button(
+    label="Baixar Excel",
+    data=xlsx_buffer,
+    file_name="comparador_acoes.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
 
 # --- Tabela de resumo ---
