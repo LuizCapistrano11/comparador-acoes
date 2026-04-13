@@ -114,7 +114,7 @@ if busca:
                 label = f"{simbolo} — {nome_limpo} ({bolsa})"
                 ja_adicionado = simbolo in st.session_state.tickers_ativos
                 st.sidebar.button(
-                    f"{'\\u2705' if ja_adicionado else '\\u2795'} {label}",
+                    f"{'✅' if ja_adicionado else '➕'} {label}",
                     key=f"add_{simbolo}",
                     on_click=adicionar_ticker,
                     args=(simbolo, nome_raw),
@@ -129,7 +129,7 @@ with st.sidebar.expander("Tickers populares"):
         nome_display = _display_name(ticker)
         ja_adicionado = ticker in st.session_state.tickers_ativos
         st.button(
-            f"{'\\u2705' if ja_adicionado else '\\u2795'} {nome_display} ({ticker})",
+            f"{'✅' if ja_adicionado else '➕'} {nome_display} ({ticker})",
             key=f"pop_{ticker}",
             on_click=adicionar_ticker,
             args=(ticker,),
@@ -144,7 +144,7 @@ if st.session_state.tickers_ativos:
     for ticker in list(st.session_state.tickers_ativos):
         nome_display = _display_name(ticker)
         st.sidebar.button(
-            f"\\u274c {nome_display} ({ticker})",
+            f"❌ {nome_display} ({ticker})",
             key=f"rem_{ticker}",
             on_click=remover_ticker,
             args=(ticker,),
