@@ -27,7 +27,43 @@ TICKERS_POPULARES = [
     "TSLA",
 ]
 
-NOMES = {"^BVSP": "IBOVESPA"}
+# Mapa de nomes amigáveis para tickers conhecidos
+NOMES = {
+    "^BVSP": "Ibovespa",
+    "^GSPC": "S&P 500",
+    "^DJI": "Dow Jones",
+    "^IXIC": "Nasdaq",
+    "^RUT": "Russell 2000",
+    "^FTSE": "FTSE 100",
+    "^N225": "Nikkei 225",
+    "^STOXX50E": "Euro Stoxx 50",
+    "^HSI": "Hang Seng",
+    "USDBRL=X": "Dólar/Real",
+    "EURBRL=X": "Euro/Real",
+    "BTC-USD": "Bitcoin",
+    "ETH-USD": "Ethereum",
+    "GC=F": "Ouro",
+    "CL=F": "Petróleo WTI",
+    "SI=F": "Prata",
+}
+
+
+def nome_amigavel(ticker, nome_busca=None):
+    """Retorna nome amigável para exibição."""
+    if ticker in NOMES:
+        return NOMES[ticker]
+    if nome_busca:
+        # Limpa nomes típicos do Yahoo Finance
+        nome = nome_busca
+        for sufixo in [" S.A.", " SA", " S/A", " Corp.", " Corporation",
+                       " Inc.", " Inc", " Ltd.", " Ltd", " Holdings",
+                       " Holding", " - ", " N2", " NM", " ON", " PN",
+                       " EDJ", " EJ", " DR3", " UNT"]:
+            nome = nome.split(sufixo)[0]
+        return nome.strip()
+    # Fallback: remove .SA e limpa
+    return ticker.replace(".SA", "")
+
 
 # --- Estado persistente dos tickers ---
 if "tickers_ativos" not in st.session_state:
@@ -48,6 +84,14 @@ def remover_ticker(ticker):
         st.session_state.tickers_ativos.remove(ticker)
 
 
+def _display_name(ticker):
+    """Nome para exibição na sidebar."""
+    return nome_amigavel(
+        ticker,
+        st.session_state.nomes_cache.get(ticker),
+    )
+
+
 # --- Sidebar ---
 st.sidebar.header("Configurações")
 
@@ -64,15 +108,16 @@ if busca:
         for q in resultados.quotes:
             if q.get("isYahooFinance"):
                 simbolo = q["symbol"]
-                nome = q.get("shortname", simbolo)
+                nome_raw = q.get("shortname", simbolo)
                 bolsa = q.get("exchDisp", "")
-                label = f"{simbolo} — {nome} ({bolsa})"
+                nome_limpo = nome_amigavel(simbolo, nome_raw)
+                label = f"{simbolo} — {nome_limpo} ({bolsa})"
                 ja_adicionado = simbolo in st.session_state.tickers_ativos
                 st.sidebar.button(
                     f"{'\\u2705' if ja_adicionado else '\\u2795'} {label}",
                     key=f"add_{simbolo}",
                     on_click=adicionar_ticker,
-                    args=(simbolo, nome),
+                    args=(simbolo, nome_raw),
                     disabled=ja_adicionado,
                 )
     except Exception:
@@ -81,7 +126,7 @@ if busca:
 # Atalhos para tickers populares
 with st.sidebar.expander("Tickers populares"):
     for ticker in TICKERS_POPULARES:
-        nome_display = NOMES.get(ticker, ticker.replace(".SA", ""))
+        nome_display = _display_name(ticker)
         ja_adicionado = ticker in st.session_state.tickers_ativos
         st.button(
             f"{'\\u2705' if ja_adicionado else '\\u2795'} {nome_display} ({ticker})",
@@ -97,11 +142,7 @@ st.sidebar.markdown("---")
 st.sidebar.subheader("Ativos no gráfico")
 if st.session_state.tickers_ativos:
     for ticker in list(st.session_state.tickers_ativos):
-        nome_display = (
-            st.session_state.nomes_cache.get(ticker)
-            or NOMES.get(ticker)
-            or ticker.replace(".SA", "")
-        )
+        nome_display = _display_name(ticker)
         st.sidebar.button(
             f"\\u274c {nome_display} ({ticker})",
             key=f"rem_{ticker}",
@@ -115,51 +156,73 @@ tickers_selecionados = list(st.session_state.tickers_ativos)
 
 st.sidebar.markdown("---")
 
-ajuste_dividendos = st.sidebar.toggle(
-    "Incluir dividendos (retorno total)",
-    value=False,
-    help="Ativado: retorno total com dividendos reinvestidos. "
-    "Desativado: apenas variação de preço (como Google Finance).",
-)
+# --- Opções de visualização ---
+st.sidebar.subheader("Visualização")
 
-mostrar_cdi = st.sidebar.toggle(
-    "Comparar com CDI",
-    value=True,
-    help="Exibe o rendimento acumulado do CDI no período.",
+ajuste_dividendos = st.sidebar.toggle(
+    "Retorno total (com dividendos)",
+    value=False,
+    help="Inclui dividendos reinvestidos no cálculo de retorno. "
+    "Desativado: apenas variação de preço.",
 )
 
 preco_em_dolar = st.sidebar.toggle(
-    "Preços em dólar (USD)",
+    "Converter para dólar (USD)",
     value=False,
     help="Converte os preços dos ativos para dólar usando o câmbio USDBRL.",
 )
 
+st.sidebar.markdown("---")
+
+# --- Benchmarks e indicadores ---
+st.sidebar.subheader("Benchmarks")
+
+mostrar_cdi = st.sidebar.toggle(
+    "CDI acumulado",
+    value=True,
+    help="Rendimento acumulado do CDI no período (base 100).",
+)
+
+st.sidebar.markdown("---")
+
+# --- Indicadores macro ---
+st.sidebar.subheader("Indicadores macro")
+
 mostrar_cambio = st.sidebar.toggle(
-    "Exibir câmbio USDBRL",
+    "Câmbio (USD/BRL)",
     value=False,
-    help="Adiciona a curva do câmbio USDBRL ao gráfico.",
+    help="Cotação do dólar em reais — eixo secundário.",
+)
+
+mostrar_selic = st.sidebar.toggle(
+    "Selic Meta",
+    value=False,
+    help="Taxa Selic Meta definida pelo Copom — eixo secundário.",
 )
 
 mostrar_juro_longo = st.sidebar.toggle(
-    "Exibir juro longo (Swap Pré 5 anos)",
+    "Juro longo Brasil (Swap Pré 5a)",
     value=False,
-    help="Adiciona a curva de juros (Swap DI x Pré 1800 dias) em eixo secundário. "
+    help="Swap DI x Pré 5 anos — expectativa de juros de longo prazo no Brasil. "
     "Dados mensais do BCB interpolados para frequência diária.",
 )
 
 mostrar_fed_curto = st.sidebar.toggle(
-    "Exibir Fed Funds Rate (curto)",
+    "Fed Rate (T-Bill 13 semanas)",
     value=False,
-    help="T-Bill 13 semanas (^IRX) — proxy da taxa básica do Fed, comparável ao CDI.",
+    help="Taxa de juros de curto prazo dos EUA — comparável à Selic/CDI.",
 )
 
 mostrar_fed_longo = st.sidebar.toggle(
-    "Exibir Treasury 5 anos (EUA)",
+    "Treasury 5 anos (EUA)",
     value=False,
-    help="Yield do Treasury de 5 anos (^FVX) — comparável ao juro longo brasileiro.",
+    help="Yield do título de 5 anos americano — comparável ao juro longo brasileiro.",
 )
 
 st.sidebar.markdown("---")
+
+# --- Período ---
+st.sidebar.subheader("Período")
 
 periodo_opcoes = {
     "1 mês": 30,
@@ -265,6 +328,16 @@ def baixar_cdi(inicio, fim):
 
 
 @st.cache_data(ttl=3600)
+def baixar_selic(inicio, fim):
+    """Baixa Selic Meta do BCB (série 432)."""
+    serie = _baixar_serie_bcb(432, inicio, fim)
+    if serie is None:
+        return None
+    serie.name = "selic"
+    return serie
+
+
+@st.cache_data(ttl=3600)
 def baixar_cambio(inicio, fim):
     """Baixa câmbio USDBRL via yfinance."""
     df = yf.download("USDBRL=X", start=inicio, end=fim, progress=False)
@@ -281,7 +354,6 @@ def baixar_juro_longo(inicio, fim):
     serie = _baixar_serie_bcb(7815, inicio, fim)
     if serie is None:
         return None
-    # Interpolar dados mensais para frequência diária (dias úteis)
     idx_diario = pd.bdate_range(start=serie.index[0], end=serie.index[-1])
     serie = serie.reindex(idx_diario).interpolate(method="linear")
     serie.name = "juro_longo"
@@ -313,6 +385,10 @@ with st.spinner("Baixando dados..."):
     if mostrar_cdi:
         cdi_acum = baixar_cdi(data_inicio, data_fim)
 
+    selic = None
+    if mostrar_selic:
+        selic = baixar_selic(data_inicio, data_fim)
+
     juro_longo = None
     if mostrar_juro_longo:
         juro_longo = baixar_juro_longo(data_inicio, data_fim)
@@ -338,7 +414,6 @@ df_precos = pd.DataFrame(dados)
 df_precos = df_precos.dropna(how="all")
 
 # Ajustar janela: começar na data do dado mais recente entre todos os ativos
-# para garantir que todos tenham dados desde o início e base 100 seja comparável
 data_inicio_efetiva = df_precos.apply(lambda col: col.dropna().index[0]).max()
 df_precos = df_precos.loc[data_inicio_efetiva:]
 df_precos = df_precos.dropna(how="all")
@@ -347,40 +422,28 @@ if df_precos.empty:
     st.error("Não há dados suficientes para o período e ativos selecionados.")
     st.stop()
 
-# Recortar CDI, câmbio e juro longo para a mesma janela
+# Recortar indicadores para a mesma janela
+def _recortar(serie, inicio):
+    if serie is None:
+        return None
+    serie = serie.loc[serie.index >= inicio]
+    return serie if not serie.empty else None
+
+cdi_acum = _recortar(cdi_acum, data_inicio_efetiva)
 if cdi_acum is not None:
-    cdi_acum = cdi_acum.loc[cdi_acum.index >= data_inicio_efetiva]
-    if not cdi_acum.empty:
-        cdi_acum = cdi_acum / cdi_acum.iloc[0] * 100
-    else:
-        cdi_acum = None
+    cdi_acum = cdi_acum / cdi_acum.iloc[0] * 100
 
-if cambio is not None:
-    cambio = cambio.loc[cambio.index >= data_inicio_efetiva]
-    if cambio.empty:
-        cambio = None
-
-if juro_longo is not None:
-    juro_longo = juro_longo.loc[juro_longo.index >= data_inicio_efetiva]
-    if juro_longo.empty:
-        juro_longo = None
-
-if fed_curto is not None:
-    fed_curto = fed_curto.loc[fed_curto.index >= data_inicio_efetiva]
-    if fed_curto.empty:
-        fed_curto = None
-
-if fed_longo is not None:
-    fed_longo = fed_longo.loc[fed_longo.index >= data_inicio_efetiva]
-    if fed_longo.empty:
-        fed_longo = None
+cambio = _recortar(cambio, data_inicio_efetiva)
+selic = _recortar(selic, data_inicio_efetiva)
+juro_longo = _recortar(juro_longo, data_inicio_efetiva)
+fed_curto = _recortar(fed_curto, data_inicio_efetiva)
+fed_longo = _recortar(fed_longo, data_inicio_efetiva)
 
 # Converter para dólar se necessário
 if preco_em_dolar and cambio is not None:
     cambio_alinhado = cambio.reindex(df_precos.index, method="ffill")
     df_precos = df_precos.div(cambio_alinhado, axis=0)
     df_precos = df_precos.dropna(how="all")
-    # Converter CDI acumulado para dólar também
     if cdi_acum is not None:
         cambio_cdi = cambio.reindex(cdi_acum.index, method="ffill")
         cdi_em_usd = cdi_acum / cambio_cdi
@@ -399,45 +462,25 @@ if data_min < data_max:
         value=(data_min, data_max),
         format="DD/MM/YYYY",
     )
-    # Filtrar todos os dados pela janela selecionada
     dt_ini = pd.Timestamp(janela[0])
     dt_end = pd.Timestamp(janela[1])
     df_precos = df_precos.loc[dt_ini:dt_end]
 
+    def _recortar_janela(serie):
+        if serie is None:
+            return None
+        serie = serie.loc[(serie.index >= dt_ini) & (serie.index <= dt_end)]
+        return serie if not serie.empty else None
+
+    cdi_acum = _recortar_janela(cdi_acum)
     if cdi_acum is not None:
-        cdi_acum = cdi_acum.loc[
-            (cdi_acum.index >= dt_ini) & (cdi_acum.index <= dt_end)
-        ]
-        if not cdi_acum.empty:
-            cdi_acum = cdi_acum / cdi_acum.iloc[0] * 100
-        else:
-            cdi_acum = None
+        cdi_acum = cdi_acum / cdi_acum.iloc[0] * 100
 
-    if cambio is not None:
-        cambio = cambio.loc[(cambio.index >= dt_ini) & (cambio.index <= dt_end)]
-        if cambio.empty:
-            cambio = None
-
-    if juro_longo is not None:
-        juro_longo = juro_longo.loc[
-            (juro_longo.index >= dt_ini) & (juro_longo.index <= dt_end)
-        ]
-        if juro_longo.empty:
-            juro_longo = None
-
-    if fed_curto is not None:
-        fed_curto = fed_curto.loc[
-            (fed_curto.index >= dt_ini) & (fed_curto.index <= dt_end)
-        ]
-        if fed_curto.empty:
-            fed_curto = None
-
-    if fed_longo is not None:
-        fed_longo = fed_longo.loc[
-            (fed_longo.index >= dt_ini) & (fed_longo.index <= dt_end)
-        ]
-        if fed_longo.empty:
-            fed_longo = None
+    cambio = _recortar_janela(cambio)
+    selic = _recortar_janela(selic)
+    juro_longo = _recortar_janela(juro_longo)
+    fed_curto = _recortar_janela(fed_curto)
+    fed_longo = _recortar_janela(fed_longo)
 
 if df_precos.empty or len(df_precos) < 2:
     st.warning("Janela muito curta — selecione um intervalo maior.")
@@ -448,10 +491,14 @@ df_base100 = (df_precos / df_precos.iloc[0]) * 100
 
 # --- Gráfico ---
 tem_cambio_eixo = mostrar_cambio and cambio is not None
+tem_selic_eixo = mostrar_selic and selic is not None
 tem_juro_eixo = mostrar_juro_longo and juro_longo is not None
 tem_fed_curto_eixo = mostrar_fed_curto and fed_curto is not None
 tem_fed_longo_eixo = mostrar_fed_longo and fed_longo is not None
-usar_secundario = tem_cambio_eixo or tem_juro_eixo or tem_fed_curto_eixo or tem_fed_longo_eixo
+usar_secundario = (
+    tem_cambio_eixo or tem_selic_eixo or tem_juro_eixo
+    or tem_fed_curto_eixo or tem_fed_longo_eixo
+)
 
 if usar_secundario:
     fig = make_subplots(specs=[[{"secondary_y": True}]])
@@ -459,7 +506,7 @@ else:
     fig = go.Figure()
 
 for col in df_base100.columns:
-    nome = NOMES.get(col, col.replace(".SA", ""))
+    nome = nome_amigavel(col, st.session_state.nomes_cache.get(col))
     fig.add_trace(
         go.Scatter(
             x=df_base100.index,
@@ -489,55 +536,73 @@ if mostrar_cdi and cdi_acum is not None:
         secondary_y=False if usar_secundario else None,
     )
 
-# Câmbio USDBRL (valor real, eixo secundário)
+# --- Indicadores no eixo secundário ---
+
+# Câmbio USDBRL
 if tem_cambio_eixo:
     fig.add_trace(
         go.Scatter(
             x=cambio.index,
             y=cambio,
             mode="lines",
-            name="USDBRL",
+            name="Câmbio USD/BRL",
             line=dict(dash="dash", color="green", width=2),
-            hovertemplate="<b>USDBRL</b><br>"
+            hovertemplate="<b>USD/BRL</b><br>"
             + "Data: %{x|%d/%m/%Y}<br>"
             + "R$ %{y:.2f}<extra></extra>",
         ),
         secondary_y=True,
     )
 
-# Juro longo (eixo secundário)
-if tem_juro_eixo:
+# Selic Meta
+if tem_selic_eixo:
     fig.add_trace(
         go.Scatter(
-            x=juro_longo.index,
-            y=juro_longo,
+            x=selic.index,
+            y=selic,
             mode="lines",
-            name="Juro Longo (Swap Pré 5a)",
-            line=dict(dash="dashdot", color="red", width=2),
-            hovertemplate="<b>Juro Longo</b><br>"
+            name="Selic Meta",
+            line=dict(dash="dot", color="darkgoldenrod", width=2),
+            hovertemplate="<b>Selic Meta</b><br>"
             + "Data: %{x|%d/%m/%Y}<br>"
             + "Taxa: %{y:.2f}% a.a.<extra></extra>",
         ),
         secondary_y=True,
     )
 
-# Fed Funds Rate curto (eixo secundário)
+# Juro longo Brasil
+if tem_juro_eixo:
+    fig.add_trace(
+        go.Scatter(
+            x=juro_longo.index,
+            y=juro_longo,
+            mode="lines",
+            name="Juro Longo BR (Swap 5a)",
+            line=dict(dash="dashdot", color="red", width=2),
+            hovertemplate="<b>Juro Longo BR</b><br>"
+            + "Data: %{x|%d/%m/%Y}<br>"
+            + "Taxa: %{y:.2f}% a.a.<extra></extra>",
+        ),
+        secondary_y=True,
+    )
+
+# Fed Rate (curto)
 if tem_fed_curto_eixo:
     fig.add_trace(
         go.Scatter(
             x=fed_curto.index,
             y=fed_curto,
             mode="lines",
-            name="Fed Rate (T-Bill 13w)",
+            name="Fed Rate (curto)",
             line=dict(dash="dot", color="orange", width=2),
-            hovertemplate="<b>Fed Rate (curto)</b><br>"
+            hovertemplate="<b>Fed Rate</b><br>"
             + "Data: %{x|%d/%m/%Y}<br>"
             + "Taxa: %{y:.2f}%<extra></extra>",
         ),
         secondary_y=True,
     )
 
-# Treasury 5 anos (eixo secundário)
+# Treasury 5Y (EUA)
 if tem_fed_longo_eixo:
     fig.add_trace(
         go.Scatter(
@@ -557,8 +622,8 @@ if tem_fed_longo_eixo:
 if usar_secundario:
     labels = []
     if tem_cambio_eixo:
-        labels.append("USDBRL (R$)")
-    if tem_juro_eixo or tem_fed_curto_eixo or tem_fed_longo_eixo:
+        labels.append("USD/BRL (R$)")
+    if tem_selic_eixo or tem_juro_eixo or tem_fed_curto_eixo or tem_fed_longo_eixo:
         labels.append("Taxa (% a.a.)")
     fig.update_yaxes(title_text=" / ".join(labels), secondary_y=True)
 
@@ -590,7 +655,7 @@ st.subheader("Resumo do Período")
 
 resumo = []
 for col in df_base100.columns:
-    nome = NOMES.get(col, col.replace(".SA", ""))
+    nome = nome_amigavel(col, st.session_state.nomes_cache.get(col))
     serie = df_base100[col].dropna()
     if len(serie) < 2:
         continue
