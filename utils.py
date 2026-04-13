@@ -1,6 +1,4 @@
-import hashlib
 import pickle
-import time
 from pathlib import Path
 
 import streamlit as st
@@ -10,22 +8,31 @@ import requests
 from datetime import timedelta
 
 # ---------------------------------------------------------------------------
-# Cache em disco — sobrevive a restarts do Streamlit
+# Cache em disco — incremental (só busca dias novos, nunca re-baixa histórico)
 # ---------------------------------------------------------------------------
 _CACHE_DIR = Path(__file__).parent / ".cache"
 _CACHE_DIR.mkdir(exist_ok=True)
 
-_TTL_PRECO = 4 * 3600       # preços de ativos: 4 horas
-_TTL_BCB   = 12 * 3600      # séries do BCB: 12 horas
+
+def _ultimo_dia_util():
+    """Retorna o último dia útil encerrado."""
+    hoje = pd.Timestamp.now().normalize()
+    return hoje - pd.tseries.offsets.BDay(1)
 
 
-def _chave(*args):
-    return hashlib.md5(str(args).encode()).hexdigest()
+def _safe_name(s):
+    return s.replace("/", "_").replace("^", "_").replace("=", "_")
 
 
-def _disk_get(chave):
-    path = _CACHE_DIR / f"{chave}.pkl"
-    if path.exists() and (time.time() - path.stat().st_mtime) < _TTL_BCB:
+# --- yfinance por ticker ---
+
+def _path_ticker(ticker, auto_adjust):
+    return _CACHE_DIR / f"yf_{_safe_name(ticker)}_{int(auto_adjust)}.pkl"
+
+
+def _load_ticker(ticker, auto_adjust):
+    path = _path_ticker(ticker, auto_adjust)
+    if path.exists():
         try:
             with open(path, "rb") as f:
                 return pickle.load(f)
@@ -34,22 +41,46 @@ def _disk_get(chave):
     return None
 
 
-def _disk_get_preco(chave):
-    path = _CACHE_DIR / f"{chave}.pkl"
-    if path.exists() and (time.time() - path.stat().st_mtime) < _TTL_PRECO:
-        try:
-            with open(path, "rb") as f:
-                return pickle.load(f)
-        except Exception:
-            pass
-    return None
-
-
-def _disk_set(chave, valor):
-    path = _CACHE_DIR / f"{chave}.pkl"
+def _save_ticker(ticker, auto_adjust, serie):
     try:
-        with open(path, "wb") as f:
-            pickle.dump(valor, f)
+        with open(_path_ticker(ticker, auto_adjust), "wb") as f:
+            pickle.dump(serie, f)
+    except Exception:
+        pass
+
+
+def _merge(existente, novo):
+    """Une duas séries, remove duplicatas, ordena."""
+    if existente is None:
+        return novo
+    if novo is None or novo.empty:
+        return existente
+    combined = pd.concat([existente, novo])
+    combined = combined[~combined.index.duplicated(keep="last")]
+    return combined.sort_index()
+
+
+# --- BCB por série ---
+
+def _path_bcb(serie_id):
+    return _CACHE_DIR / f"bcb_{serie_id}.pkl"
+
+
+def _load_bcb(serie_id):
+    path = _path_bcb(serie_id)
+    if path.exists():
+        try:
+            with open(path, "rb") as f:
+                return pickle.load(f)
+        except Exception:
+            pass
+    return None
+
+
+def _save_bcb(serie_id, serie):
+    try:
+        with open(_path_bcb(serie_id), "wb") as f:
+            pickle.dump(serie, f)
     except Exception:
         pass
 
@@ -149,96 +180,136 @@ def nome_amigavel(ticker, nome_busca=None):
 
 
 # ---------------------------------------------------------------------------
-# Download de preços — batch (todos os tickers de uma vez)
+# Download de preços — incremental por ticker, download em lote
 # ---------------------------------------------------------------------------
-@st.cache_data(ttl=_TTL_PRECO)
-def baixar_dados(tickers, inicio, fim, auto_adjust):
-    """Baixa preços de fechamento em lote via yfinance."""
-    chave = _chave("dados", tickers, inicio, fim, auto_adjust)
-    cached = _disk_get_preco(chave)
-    if cached is not None:
-        return cached
-
-    dados = {}
-    erros = []
+def _baixar_lote_yf(tickers, inicio, fim, auto_adjust):
+    """Baixa um lote de tickers via yfinance e retorna dict {ticker: serie}."""
+    resultado = {}
+    if not tickers:
+        return resultado
     lista = list(tickers)
-
-    if not lista:
-        return dados, erros
-
     try:
-        # Download em lote — muito mais rápido que um por um
         raw = yf.download(
-            lista, start=inicio, end=fim,
-            progress=False, auto_adjust=auto_adjust,
-            group_by="ticker",
+            lista, start=inicio, end=fim + pd.Timedelta(days=1),
+            progress=False, auto_adjust=auto_adjust, group_by="ticker",
         )
-
         if raw.empty:
-            erros.append("Sem dados para o período.")
-            return dados, erros
-
+            return resultado
         if len(lista) == 1:
-            # yfinance retorna colunas simples quando só há 1 ticker
             if isinstance(raw.columns, pd.MultiIndex):
                 raw.columns = raw.columns.get_level_values(0)
             serie = raw["Close"].dropna()
             if not serie.empty:
-                dados[lista[0]] = serie
-            else:
-                erros.append(f"{lista[0]}: sem dados para o período")
+                resultado[lista[0]] = serie
         else:
             for ticker in lista:
                 try:
                     serie = raw[ticker]["Close"].dropna()
                     if not serie.empty:
-                        dados[ticker] = serie
-                    else:
-                        erros.append(f"{ticker}: sem dados para o período")
+                        resultado[ticker] = serie
                 except Exception:
-                    erros.append(f"{ticker}: sem dados para o período")
-
-    except Exception as e:
-        # Fallback: download individual se o lote falhar
+                    pass
+    except Exception:
+        # fallback individual
         for ticker in lista:
             try:
                 df = yf.download(
-                    ticker, start=inicio, end=fim,
+                    ticker, start=inicio, end=fim + pd.Timedelta(days=1),
                     progress=False, auto_adjust=auto_adjust,
                 )
                 if not df.empty:
                     if isinstance(df.columns, pd.MultiIndex):
                         df.columns = df.columns.get_level_values(0)
-                    dados[ticker] = df["Close"].dropna()
-                else:
-                    erros.append(f"{ticker}: sem dados para o período")
-            except Exception as e2:
-                erros.append(f"{ticker}: {e2}")
-
-    resultado = (dados, erros)
-    _disk_set(chave, resultado)
+                    serie = df["Close"].dropna()
+                    if not serie.empty:
+                        resultado[ticker] = serie
+            except Exception:
+                pass
     return resultado
 
 
-# ---------------------------------------------------------------------------
-# Séries do BCB — com cache em disco (12 h)
-# ---------------------------------------------------------------------------
-def _baixar_serie_bcb(serie, inicio_str, fim_str):
-    """Baixa série do BCB em blocos de 10 anos com cache em disco."""
-    chave = _chave("bcb", serie, inicio_str, fim_str)
-    cached = _disk_get(chave)
-    if cached is not None:
-        return cached
+@st.cache_data(ttl=3600)
+def baixar_dados(tickers, inicio, fim, auto_adjust):
+    """
+    Retorna preços de fechamento com cache incremental em disco.
+    Histórico já baixado é mantido para sempre; só busca dias novos.
+    """
+    dados = {}
+    erros = []
+    lista = list(tickers)
+    dt_inicio = pd.Timestamp(inicio)
+    dt_fim = pd.Timestamp(fim)
+    ultimo_util = _ultimo_dia_util()
 
-    dt_inicio = pd.to_datetime(inicio_str)
-    dt_fim = pd.to_datetime(fim_str)
+    # Separar tickers que precisam de fetch e qual janela falta
+    precisam_fetch = []   # não tem cache ou cache desatualizado
+    fetch_desde = dt_fim  # data mais antiga que precisamos buscar
+
+    for ticker in lista:
+        cache = _load_ticker(ticker, auto_adjust)
+        if cache is not None and not cache.empty:
+            cache_ok_inicio = cache.index[0] <= dt_inicio
+            cache_ok_fim = cache.index[-1] >= ultimo_util
+
+            if cache_ok_inicio and cache_ok_fim:
+                # Cache completo: só fatia
+                dados[ticker] = cache.loc[dt_inicio:dt_fim]
+                continue
+
+            # Cache existe mas precisa de extensão
+            precisam_fetch.append(ticker)
+            if not cache_ok_fim:
+                # Falta do final do cache até hoje
+                fetch_desde = min(fetch_desde, cache.index[-1] + pd.Timedelta(days=1))
+            if not cache_ok_inicio:
+                # Falta do início solicitado até o começo do cache
+                fetch_desde = min(fetch_desde, dt_inicio)
+        else:
+            precisam_fetch.append(ticker)
+            fetch_desde = min(fetch_desde, dt_inicio)
+
+    # Baixar apenas o que falta, em lote
+    if precisam_fetch:
+        novos = _baixar_lote_yf(precisam_fetch, fetch_desde, dt_fim, auto_adjust)
+
+        for ticker in precisam_fetch:
+            cache = _load_ticker(ticker, auto_adjust)
+            novo = novos.get(ticker)
+
+            if novo is None and cache is None:
+                erros.append(f"{ticker}: sem dados para o período")
+                continue
+
+            # Mescla cache existente com dados novos
+            serie_completa = _merge(cache, novo)
+            _save_ticker(ticker, auto_adjust, serie_completa)
+
+            fatia = serie_completa.loc[dt_inicio:dt_fim] if serie_completa is not None else None
+            if fatia is not None and not fatia.empty:
+                dados[ticker] = fatia
+            elif cache is not None:
+                fatia = cache.loc[dt_inicio:dt_fim]
+                if not fatia.empty:
+                    dados[ticker] = fatia
+                else:
+                    erros.append(f"{ticker}: sem dados para o período")
+            else:
+                erros.append(f"{ticker}: sem dados para o período")
+
+    return dados, erros
+
+
+# ---------------------------------------------------------------------------
+# Séries do BCB — incremental por série
+# ---------------------------------------------------------------------------
+def _fetch_bcb_raw(serie_id, dt_inicio, dt_fim):
+    """Busca bruta da API do BCB em blocos, sem cache."""
     frames = []
     cursor = dt_inicio
-
     while cursor < dt_fim:
         bloco_fim = min(cursor + timedelta(days=3650), dt_fim)
         url = (
-            f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{serie}/dados"
+            f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{serie_id}/dados"
             f"?formato=json"
             f"&dataInicial={cursor.strftime('%d/%m/%Y')}"
             f"&dataFinal={bloco_fim.strftime('%d/%m/%Y')}"
@@ -252,8 +323,7 @@ def _baixar_serie_bcb(serie, inicio_str, fim_str):
                         frames.append(pd.DataFrame(data))
                 break
             except requests.exceptions.ReadTimeout:
-                if tentativa == 2:
-                    pass
+                pass
         cursor = bloco_fim + timedelta(days=1)
 
     if not frames:
@@ -264,13 +334,50 @@ def _baixar_serie_bcb(serie, inicio_str, fim_str):
     df["valor"] = df["valor"].astype(float)
     df = df.set_index("data").sort_index()
     df = df[~df.index.duplicated(keep="last")]
-    resultado = df["valor"]
-
-    _disk_set(chave, resultado)
-    return resultado
+    return df["valor"]
 
 
-@st.cache_data(ttl=_TTL_BCB)
+def _baixar_serie_bcb(serie_id, inicio_str, fim_str):
+    """
+    Baixa série do BCB com cache incremental em disco.
+    Histórico já baixado nunca é re-baixado.
+    """
+    dt_inicio = pd.to_datetime(inicio_str)
+    dt_fim = pd.to_datetime(fim_str)
+    ontem = pd.Timestamp.now().normalize() - pd.Timedelta(days=1)
+
+    cache = _load_bcb(serie_id)
+
+    if cache is not None and not cache.empty:
+        cache_ok_inicio = cache.index[0] <= dt_inicio
+        cache_ok_fim = cache.index[-1] >= ontem
+
+        if cache_ok_inicio and cache_ok_fim:
+            return cache.loc[dt_inicio:dt_fim]
+
+        # Estender para frente se necessário
+        if not cache_ok_fim:
+            fetch_from = cache.index[-1] + pd.Timedelta(days=1)
+            novo = _fetch_bcb_raw(serie_id, fetch_from, dt_fim)
+            cache = _merge(cache, novo)
+
+        # Estender para trás se necessário
+        if not cache_ok_inicio:
+            fetch_to = cache.index[0] - pd.Timedelta(days=1)
+            novo = _fetch_bcb_raw(serie_id, dt_inicio, fetch_to)
+            cache = _merge(novo, cache)
+
+        _save_bcb(serie_id, cache)
+        return cache.loc[dt_inicio:dt_fim]
+
+    # Sem cache: baixa tudo e salva
+    serie = _fetch_bcb_raw(serie_id, dt_inicio, dt_fim)
+    if serie is not None:
+        _save_bcb(serie_id, serie)
+    return serie
+
+
+@st.cache_data(ttl=3600)
 def baixar_cdi(inicio, fim):
     serie = _baixar_serie_bcb(12, inicio, fim)
     if serie is None:
@@ -281,12 +388,12 @@ def baixar_cdi(inicio, fim):
     return acum
 
 
-@st.cache_data(ttl=_TTL_BCB)
+@st.cache_data(ttl=3600)
 def baixar_cdi_diario(inicio, fim):
     return _baixar_serie_bcb(12, inicio, fim)
 
 
-@st.cache_data(ttl=_TTL_BCB)
+@st.cache_data(ttl=3600)
 def baixar_selic(inicio, fim):
     serie = _baixar_serie_bcb(432, inicio, fim)
     if serie is None:
@@ -295,7 +402,7 @@ def baixar_selic(inicio, fim):
     return serie
 
 
-@st.cache_data(ttl=_TTL_PRECO)
+@st.cache_data(ttl=3600)
 def baixar_cambio(inicio, fim):
     df = yf.download("USDBRL=X", start=inicio, end=fim, progress=False)
     if df.empty:
@@ -305,7 +412,7 @@ def baixar_cambio(inicio, fim):
     return df["Close"]
 
 
-@st.cache_data(ttl=_TTL_BCB)
+@st.cache_data(ttl=3600)
 def baixar_juro_longo(inicio, fim):
     serie = _baixar_serie_bcb(7815, inicio, fim)
     if serie is None:
@@ -316,7 +423,7 @@ def baixar_juro_longo(inicio, fim):
     return serie
 
 
-@st.cache_data(ttl=_TTL_PRECO)
+@st.cache_data(ttl=3600)
 def baixar_taxa_yf(ticker, inicio, fim):
     df = yf.download(ticker, start=inicio, end=fim, progress=False)
     if df.empty:
