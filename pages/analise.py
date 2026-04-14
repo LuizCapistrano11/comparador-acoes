@@ -9,6 +9,7 @@ from utils import (
     IBOVESPA_TICKERS, SP500_TOP50, SMLL_TICKERS,
     nome_amigavel, baixar_dados, baixar_cdi, baixar_cdi_diario,
     baixar_selic, baixar_cambio, baixar_juro_longo, baixar_taxa_yf,
+    baixar_volume_financeiro, load_metricas_cache, save_metricas_cache,
 )
 
 st.title("Análise de Ativos")
@@ -308,8 +309,8 @@ def plotar_base100_com_macro(df_precos_janela, titulo_chart, chart_inicio, chart
     )
 
 
-def _calcular_metricas(ticker, serie, cdi_para_analise, ibov_para_analise,
-                       data_inicio_r, data_fim_r):
+def _calcular_metricas(ticker, serie, cdi_para_analise, ibov_para_analise, liquidez_3m=0):
+    """Calcula métricas de um ativo. liquidez_3m já vem pré-calculado em lote."""
     serie = serie.dropna()
     if len(serie) < 20:
         return None
@@ -321,20 +322,6 @@ def _calcular_metricas(ticker, serie, cdi_para_analise, ibov_para_analise,
 
     pico = serie.cummax()
     dd_max = (((serie - pico) / pico) * 100).min()
-
-    try:
-        df_vol = yf.download(
-            ticker, start=data_inicio_r, end=data_fim_r,
-            progress=False, auto_adjust=False,
-        )
-        if isinstance(df_vol.columns, pd.MultiIndex):
-            df_vol.columns = df_vol.columns.get_level_values(0)
-        if not df_vol.empty and "Volume" in df_vol.columns and "Close" in df_vol.columns:
-            liquidez_3m = (df_vol["Volume"] * df_vol["Close"]).tail(63).mean()
-        else:
-            liquidez_3m = 0
-    except Exception:
-        liquidez_3m = 0
 
     alpha_cdi_val = None
     if cdi_para_analise is not None and len(cdi_para_analise) >= 2:
@@ -415,90 +402,125 @@ with tab_ranking:
     if st.button("Rodar análise", key="btn_ranking"):
         metrica_key = METRICAS[metrica_nome]
         universo = UNIVERSOS[universo_nome]
+        use_adj = metrica_key == "retorno_total"
+        universe_key = (universo_nome, use_adj)
 
-        with st.spinner(f"Analisando {len(universo)} ativos..."):
-            use_adj = metrica_key == "retorno_total"
+        # --- Fase 1: downloads (com feedback) ---
+        status_dl = st.empty()
 
-            # Baixar dados para o período do ranking
-            dados_rank, _ = baixar_dados(
-                tuple(universo), data_inicio, data_fim, use_adj,
+        status_dl.info("Baixando preços...")
+        dados_rank, _ = baixar_dados(tuple(universo), data_inicio, data_fim, use_adj)
+        if not dados_rank:
+            status_dl.empty()
+            st.error("Não foi possível baixar dados do universo selecionado.")
+            st.stop()
+
+        status_dl.info("Baixando volume financeiro...")
+        vol_dict = baixar_volume_financeiro(tuple(universo), data_inicio, data_fim)
+
+        cdi_para_analise = None
+        if metrica_key in ("alpha_cdi", "sharpe"):
+            status_dl.info("Baixando CDI...")
+            cdi_para_analise = baixar_cdi(str(data_inicio), str(data_fim))
+
+        ibov_para_analise = None
+        if metrica_key == "alpha_ibov":
+            status_dl.info("Baixando Ibovespa...")
+            df_ibov = yf.download(
+                "^BVSP", start=data_inicio, end=data_fim,
+                progress=False, auto_adjust=use_adj,
             )
-            if not dados_rank:
-                st.error("Não foi possível baixar dados do universo selecionado.")
-                st.stop()
+            if not df_ibov.empty:
+                if isinstance(df_ibov.columns, pd.MultiIndex):
+                    df_ibov.columns = df_ibov.columns.get_level_values(0)
+                ibov_para_analise = df_ibov["Close"]
 
-            cdi_para_analise = None
-            if metrica_key in ("alpha_cdi", "sharpe"):
-                cdi_para_analise = baixar_cdi(str(data_inicio), str(data_fim))
+        status_dl.empty()
 
-            ibov_para_analise = None
-            if metrica_key == "alpha_ibov":
-                df_ibov = yf.download(
-                    "^BVSP", start=data_inicio, end=data_fim,
-                    progress=False, auto_adjust=use_adj,
-                )
-                if not df_ibov.empty:
-                    if isinstance(df_ibov.columns, pd.MultiIndex):
-                        df_ibov.columns = df_ibov.columns.get_level_values(0)
-                    ibov_para_analise = df_ibov["Close"]
+        # --- Fase 2: calcular métricas (cache ou progresso) ---
+        df_resultados_cache = load_metricas_cache(
+            universe_key, data_inicio, data_fim, use_adj
+        )
 
-            # Calcular métricas e ranking
+        if df_resultados_cache is not None:
+            # Cache hit: zero espera
+            todos_resultados = df_resultados_cache
+        else:
+            # Cache miss: calcular com barra de progresso
+            total = len(dados_rank)
+            barra = st.progress(0, text="Calculando métricas...")
+            status_calc = st.empty()
             resultados = []
-            for ticker, serie in dados_rank.items():
-                r = _calcular_metricas(
-                    ticker, serie, cdi_para_analise, ibov_para_analise,
-                    data_inicio, data_fim,
-                )
-                if r is None:
-                    continue
 
-                if metrica_key in ("retorno_preco", "retorno_total"):
-                    r["_ranking"] = r["Retorno (%)"]
-                elif metrica_key == "alpha_cdi":
-                    r["_ranking"] = r["Alpha vs CDI (%)"] if r["Alpha vs CDI (%)"] is not None else -9999
-                elif metrica_key == "alpha_ibov":
-                    r["_ranking"] = r["Alpha vs Ibov (%)"] if r["Alpha vs Ibov (%)"] is not None else -9999
-                elif metrica_key == "volatilidade":
-                    r["_ranking"] = r["Volatilidade (% a.a.)"]
-                elif metrica_key == "drawdown_max":
-                    r["_ranking"] = r["Drawdown Máx. (%)"]
-                elif metrica_key == "sharpe":
-                    r["_ranking"] = r["Sharpe"] if r["Sharpe"] is not None else -9999
-                elif metrica_key == "liquidez":
-                    r["_ranking"] = r["Liquidez Média 3M (R$)"]
-                else:
-                    r["_ranking"] = r["Retorno (%)"]
-                resultados.append(r)
+            for i, (ticker, serie) in enumerate(dados_rank.items()):
+                status_calc.caption(
+                    f"Calculando: **{nome_amigavel(ticker)}** ({i+1}/{total})"
+                )
+                liq = vol_dict.get(ticker, 0)
+                r = _calcular_metricas(ticker, serie, cdi_para_analise, ibov_para_analise, liq)
+                if r is not None:
+                    resultados.append(r)
+                barra.progress((i + 1) / total, text=f"Calculando métricas... {i+1}/{total}")
+
+            barra.empty()
+            status_calc.empty()
 
             if not resultados:
                 st.error("Nenhum ativo com dados suficientes no período.")
                 st.stop()
 
-            df_resultados = pd.DataFrame(resultados)
+            todos_resultados = pd.DataFrame(resultados)
+            save_metricas_cache(universe_key, data_inicio, data_fim, use_adj, todos_resultados)
+
+        # Recalcular ranking com CDI/Ibov frescos se necessário
+        # (métricas base ficam no cache; ranking é aplicado em cima delas)
+        def _val_ranking(row):
+            if metrica_key in ("retorno_preco", "retorno_total"):
+                return row["Retorno (%)"]
+            elif metrica_key == "alpha_cdi":
+                v = row["Alpha vs CDI (%)"]
+                return v if pd.notna(v) else -9999
+            elif metrica_key == "alpha_ibov":
+                v = row["Alpha vs Ibov (%)"]
+                return v if pd.notna(v) else -9999
+            elif metrica_key == "volatilidade":
+                return row["Volatilidade (% a.a.)"]
+            elif metrica_key == "drawdown_max":
+                return row["Drawdown Máx. (%)"]
+            elif metrica_key == "sharpe":
+                v = row["Sharpe"]
+                return v if pd.notna(v) else -9999
+            elif metrica_key == "liquidez":
+                return row["Liquidez Média 3M (R$)"]
+            return row["Retorno (%)"]
+
+        todos_resultados = todos_resultados.copy()
+        todos_resultados["_ranking"] = todos_resultados.apply(_val_ranking, axis=1)
+
+        ascendente = direcao == "Piores"
+        if metrica_key == "volatilidade":
+            ascendente = direcao == "Melhores"
+        if metrica_key == "drawdown_max":
             ascendente = direcao == "Piores"
-            if metrica_key == "volatilidade":
-                ascendente = direcao == "Melhores"
-            if metrica_key == "drawdown_max":
-                ascendente = direcao == "Piores"
 
-            df_resultados = df_resultados.sort_values("_ranking", ascending=ascendente).head(top_n)
-            label = "Top" if direcao == "Melhores" else "Bottom"
+        df_resultados = todos_resultados.sort_values("_ranking", ascending=ascendente).head(top_n)
+        label = "Top" if direcao == "Melhores" else "Bottom"
 
-            # Baixar histórico máximo para os rankeados
-            tickers_top = df_resultados["ticker"].tolist()
+        # Histórico máximo para os rankeados
+        tickers_top = df_resultados["ticker"].tolist()
+        with st.spinner("Carregando histórico completo..."):
             dados_full, _ = baixar_dados(
                 tuple(tickers_top), DATA_INICIO_MAX, str(data_fim), use_adj,
             )
-            df_full = pd.DataFrame(
-                {t: dados_full[t] for t in tickers_top if t in dados_full}
-            ).dropna(how="all")
+        df_full = pd.DataFrame(
+            {t: dados_full[t] for t in tickers_top if t in dados_full}
+        ).dropna(how="all")
 
-            # Guardar resultados no session_state
-            st.session_state["_ranking_df"] = df_resultados
-            st.session_state["_ranking_df_full"] = df_full
-            st.session_state["_ranking_meta"] = {
-                "label": label, "top_n": top_n, "metrica_nome": metrica_nome,
-            }
+        st.session_state["_ranking_df"] = df_resultados
+        st.session_state["_ranking_df_full"] = df_full
+        st.session_state["_ranking_meta"] = {
+            "label": label, "top_n": top_n, "metrica_nome": metrica_nome,
+        }
 
     # --- Exibir resultados (persiste quando o slider muda) ---
     if st.session_state.get("_ranking_df") is not None:
@@ -553,74 +575,90 @@ with tab_cdi:
         st.session_state["_cdi_resumo"] = None
 
     if st.button("Buscar ações que bateram o CDI", key="btn_cdi"):
-        with st.spinner(f"Analisando {len(BOLSA_BR)} ações contra o CDI..."):
-            cdi_acum_ref = baixar_cdi(str(data_inicio), str(data_fim))
-            if cdi_acum_ref is None or len(cdi_acum_ref) < 2:
-                st.error("Não foi possível baixar dados do CDI para o período.")
-                st.stop()
+        # --- Downloads ---
+        status_dl = st.empty()
 
-            cdi_retorno_pct = (cdi_acum_ref.iloc[-1] / cdi_acum_ref.iloc[0] - 1) * 100
+        status_dl.info("Baixando CDI...")
+        cdi_acum_ref = baixar_cdi(str(data_inicio), str(data_fim))
+        if cdi_acum_ref is None or len(cdi_acum_ref) < 2:
+            status_dl.empty()
+            st.error("Não foi possível baixar dados do CDI para o período.")
+            st.stop()
+        cdi_retorno_pct = (cdi_acum_ref.iloc[-1] / cdi_acum_ref.iloc[0] - 1) * 100
 
-            dados_br, _ = baixar_dados(
-                tuple(BOLSA_BR), data_inicio, data_fim, usar_retorno_total,
+        status_dl.info(f"Baixando preços de {len(BOLSA_BR)} ações...")
+        dados_br, _ = baixar_dados(tuple(BOLSA_BR), data_inicio, data_fim, usar_retorno_total)
+        if not dados_br:
+            status_dl.empty()
+            st.error("Não foi possível baixar dados das ações.")
+            st.stop()
+        status_dl.empty()
+
+        # --- Calcular com barra de progresso ---
+        total = len(dados_br)
+        barra = st.progress(0, text="Comparando com CDI...")
+        status_calc = st.empty()
+
+        vencedores = []
+        perdedores_count = 0
+        sem_dados_count = 0
+
+        for i, (ticker, serie) in enumerate(dados_br.items()):
+            status_calc.caption(
+                f"Analisando: **{nome_amigavel(ticker)}** ({i+1}/{total})"
             )
-            if not dados_br:
-                st.error("Não foi possível baixar dados das ações.")
-                st.stop()
+            serie = serie.dropna()
+            if len(serie) < 20:
+                sem_dados_count += 1
+                barra.progress((i + 1) / total, text=f"Comparando com CDI... {i+1}/{total}")
+                continue
 
-            vencedores = []
-            perdedores_count = 0
-            sem_dados_count = 0
+            retorno_pct = (serie.iloc[-1] / serie.iloc[0] - 1) * 100
+            alpha = retorno_pct - cdi_retorno_pct
+            vol = serie.pct_change().dropna().std() * (252 ** 0.5) * 100
+            pico = serie.cummax()
+            dd_max = (((serie - pico) / pico) * 100).min()
 
-            for ticker, serie in dados_br.items():
-                serie = serie.dropna()
-                if len(serie) < 20:
-                    sem_dados_count += 1
-                    continue
+            if retorno_pct > cdi_retorno_pct:
+                vencedores.append({
+                    "ticker": ticker,
+                    "Ativo": nome_amigavel(ticker),
+                    "Retorno (%)": retorno_pct,
+                    "CDI (%)": cdi_retorno_pct,
+                    "Alpha vs CDI (%)": alpha,
+                    "Volatilidade (% a.a.)": vol,
+                    "Drawdown Máx. (%)": dd_max,
+                })
+            else:
+                perdedores_count += 1
 
-                retorno_pct = (serie.iloc[-1] / serie.iloc[0] - 1) * 100
-                alpha = retorno_pct - cdi_retorno_pct
-                retornos_diarios = serie.pct_change().dropna()
-                vol = retornos_diarios.std() * (252 ** 0.5) * 100
-                pico = serie.cummax()
-                dd_max = (((serie - pico) / pico) * 100).min()
+            barra.progress((i + 1) / total, text=f"Comparando com CDI... {i+1}/{total}")
 
-                if retorno_pct > cdi_retorno_pct:
-                    vencedores.append({
-                        "ticker": ticker,
-                        "Ativo": nome_amigavel(ticker),
-                        "Retorno (%)": retorno_pct,
-                        "CDI (%)": cdi_retorno_pct,
-                        "Alpha vs CDI (%)": alpha,
-                        "Volatilidade (% a.a.)": vol,
-                        "Drawdown Máx. (%)": dd_max,
-                    })
-                else:
-                    perdedores_count += 1
+        barra.empty()
+        status_calc.empty()
 
-            total_analisados = len(vencedores) + perdedores_count
+        total_analisados = len(vencedores) + perdedores_count
 
-            if not vencedores:
-                st.info("Nenhuma ação bateu o CDI no período selecionado.")
-                st.stop()
+        if not vencedores:
+            st.info("Nenhuma ação bateu o CDI no período selecionado.")
+            st.stop()
 
-            df_venc = pd.DataFrame(vencedores).sort_values("Alpha vs CDI (%)", ascending=False)
+        df_venc = pd.DataFrame(vencedores).sort_values("Alpha vs CDI (%)", ascending=False)
 
-            # Baixar histórico máximo para os top ativos do gráfico
+        with st.spinner("Carregando histórico completo para o gráfico..."):
             tickers_todos = df_venc["ticker"].tolist()
             dados_full, _ = baixar_dados(
                 tuple(tickers_todos[:30]), DATA_INICIO_MAX, str(data_fim), usar_retorno_total,
             )
-            df_full = pd.DataFrame(
-                {t: dados_full[t] for t in tickers_todos[:30] if t in dados_full}
-            ).dropna(how="all")
+        df_full = pd.DataFrame(
+            {t: dados_full[t] for t in tickers_todos[:30] if t in dados_full}
+        ).dropna(how="all")
 
-            # Guardar no session_state
-            st.session_state["_cdi_df_venc"] = df_venc
-            st.session_state["_cdi_df_full"] = df_full
-            st.session_state["_cdi_resumo"] = (
-                total_analisados, perdedores_count, sem_dados_count, cdi_retorno_pct
-            )
+        st.session_state["_cdi_df_venc"] = df_venc
+        st.session_state["_cdi_df_full"] = df_full
+        st.session_state["_cdi_resumo"] = (
+            total_analisados, perdedores_count, sem_dados_count, cdi_retorno_pct
+        )
 
     # --- Exibir resultados (persiste quando o slider ou top_n_chart muda) ---
     if st.session_state.get("_cdi_df_venc") is not None:

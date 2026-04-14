@@ -1,4 +1,5 @@
 import pickle
+import time
 from pathlib import Path
 
 import streamlit as st
@@ -431,3 +432,85 @@ def baixar_taxa_yf(ticker, inicio, fim):
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
     return df["Close"]
+
+
+# ---------------------------------------------------------------------------
+# Volume financeiro em lote — evita 139 downloads individuais
+# ---------------------------------------------------------------------------
+@st.cache_data(ttl=4 * 3600)
+def baixar_volume_financeiro(tickers, inicio, fim):
+    """
+    Baixa volume financeiro médio dos últimos 3 meses em lote.
+    Retorna dict {ticker: liquidez_media_3m_reais}.
+    """
+    chave = _chave("volbatch", tickers, str(inicio), str(fim))
+    cached = _disk_get_preco(chave)
+    if cached is not None:
+        return cached
+
+    lista = list(tickers)
+    resultado = {}
+    try:
+        raw = yf.download(
+            lista,
+            start=inicio,
+            end=pd.Timestamp(fim) + pd.Timedelta(days=1),
+            progress=False,
+            auto_adjust=False,
+            group_by="ticker",
+        )
+        if raw.empty:
+            return resultado
+
+        if len(lista) == 1:
+            if isinstance(raw.columns, pd.MultiIndex):
+                raw.columns = raw.columns.get_level_values(0)
+            if "Volume" in raw.columns and "Close" in raw.columns:
+                resultado[lista[0]] = float(
+                    (raw["Volume"] * raw["Close"]).tail(63).mean()
+                )
+        else:
+            for ticker in lista:
+                try:
+                    df_t = raw[ticker]
+                    if "Volume" in df_t.columns and "Close" in df_t.columns:
+                        resultado[ticker] = float(
+                            (df_t["Volume"] * df_t["Close"]).tail(63).mean()
+                        )
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    _disk_set(chave, resultado)
+    return resultado
+
+
+# ---------------------------------------------------------------------------
+# Cache de métricas pré-computadas (TTL: 12 h)
+# ---------------------------------------------------------------------------
+_TTL_METRICAS = 12 * 3600
+
+
+def load_metricas_cache(universe_key, inicio, fim, use_adj):
+    """Carrega DataFrame de métricas do cache em disco, se frescos."""
+    chave = _chave("metricas", universe_key, str(inicio), str(fim), use_adj)
+    path = _CACHE_DIR / f"metricas_{chave}.pkl"
+    if path.exists() and (time.time() - path.stat().st_mtime) < _TTL_METRICAS:
+        try:
+            with open(path, "rb") as f:
+                return pickle.load(f)
+        except Exception:
+            pass
+    return None
+
+
+def save_metricas_cache(universe_key, inicio, fim, use_adj, df):
+    """Salva DataFrame de métricas no cache em disco."""
+    chave = _chave("metricas", universe_key, str(inicio), str(fim), use_adj)
+    path = _CACHE_DIR / f"metricas_{chave}.pkl"
+    try:
+        with open(path, "wb") as f:
+            pickle.dump(df, f)
+    except Exception:
+        pass
